@@ -258,3 +258,7 @@ output/
 
 # Application-generated validation reports
 *.validation.txt
+
+# Claude Code local/private data
+.claude/
+
