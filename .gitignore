@@ -216,3 +216,45 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# =============================================================================
+# solari-ai-pdf-document-converter
+# =============================================================================
+
+# Source PDF documents
+# PDFs may contain confidential or copyrighted information.
+*.pdf
+
+# Generated document outputs
+*.docx
+*.doc
+*.odt
+
+# Local document processing directories
+input/
+output/
+
+# Environment files and secrets
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE / Editors
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*~
+
+# Local Ollama data
+.ollama/
+
+# Application-generated validation reports
+*.validation.txt
