@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://solari.local/schemas/removal-log-1.0.json",
+  "title": "RemovalLog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_type", "schema_version", "generated_at", "tool_version",
+    "source_pdf", "source_sha256", "page_selection", "entries"
+  ],
+  "properties": {
+    "record_type": { "const": "removal_log" },
+    "schema_version": { "const": "1.0" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "tool_version": { "type": "string", "minLength": 1 },
+    "source_pdf": { "type": "string", "minLength": 1 },
+    "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "page_selection": { "type": "string", "minLength": 1,
+      "description": "Canonical selector token (e.g. '2_5-7_10-12') or 'all'." },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "page", "element_type", "reason", "kept_due_to_ambiguity"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "page": { "type": "integer", "minimum": 1 },
+          "element_type": {
+            "enum": ["running_header", "running_footer", "page_number", "watermark",
+              "background", "auth_stamp", "barcode", "qr_code", "vertical_auth_text", "other"]
+          },
+          "text_excerpt": { "type": ["string", "null"] },
+          "bbox": {
+            "oneOf": [
+              { "type": "null" },
+              { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 }
+            ]
+          },
+          "reason": { "enum": ["matched_repeated", "matched_pattern", "classifier"] },
+          "kept_due_to_ambiguity": { "type": "boolean" },
+          "note": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}

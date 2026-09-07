@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://solari.local/schemas/traceability-record-1.0.json",
+  "title": "TraceabilityRecord",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_type", "schema_version", "generated_at", "tool_version",
+    "source_pdf", "source_sha256", "page_selection",
+    "run_id", "operation", "physical_page_ranges", "artifacts",
+    "llm_used", "network_egress"
+  ],
+  "properties": {
+    "record_type": { "const": "traceability_record" },
+    "schema_version": { "const": "1.0" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "tool_version": { "type": "string", "minLength": 1 },
+    "source_pdf": { "type": "string", "minLength": 1 },
+    "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "page_selection": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "operation": { "enum": ["convert", "extract", "validate", "fix", "export"] },
+    "physical_page_ranges": {
+      "type": "array",
+      "description": "Empty ⇒ whole document.",
+      "items": {
+        "type": "array",
+        "items": { "type": "integer", "minimum": 1 },
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "original_markdown": { "$ref": "#/$defs/artifactRef" },
+        "removal_log": { "$ref": "#/$defs/artifactRef" },
+        "validation_report": { "$ref": "#/$defs/artifactRef" },
+        "corrected_markdown": { "$ref": "#/$defs/artifactRef" },
+        "correction_log": { "$ref": "#/$defs/artifactRef" },
+        "docx": { "$ref": "#/$defs/artifactRef" }
+      }
+    },
+    "llm_used": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["base_url", "model", "operations"],
+          "properties": {
+            "base_url": { "type": "string", "minLength": 1 },
+            "model": { "type": "string", "minLength": 1 },
+            "operations": {
+              "type": "array",
+              "items": { "enum": ["validate", "fix"] },
+              "minItems": 1
+            }
+          }
+        }
+      ]
+    },
+    "network_egress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["occurred"],
+      "properties": { "occurred": { "const": false } }
+    }
+  },
+  "$defs": {
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "deterministic_name"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "deterministic_name": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://solari.local/schemas/validation-report-1.0.json",
+  "title": "ValidationReport",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_type", "schema_version", "generated_at", "tool_version",
+    "source_pdf", "source_sha256", "page_selection",
+    "markdown_file", "markdown_sha256", "llm", "checks_run", "issues", "summary"
+  ],
+  "properties": {
+    "record_type": { "const": "validation_report" },
+    "schema_version": { "const": "1.0" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "tool_version": { "type": "string", "minLength": 1 },
+    "source_pdf": { "type": "string", "minLength": 1 },
+    "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "page_selection": { "type": "string", "minLength": 1 },
+    "markdown_file": { "type": "string", "minLength": 1 },
+    "markdown_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$",
+      "description": "Hash of the Markdown as validated; identical before and after (FR-033)." },
+    "llm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "available", "base_url"],
+      "properties": {
+        "required": { "const": true },
+        "available": { "type": "boolean" },
+        "base_url": { "type": "string", "minLength": 1 },
+        "model": { "type": ["string", "null"] }
+      }
+    },
+    "checks_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deterministic", "semantic"],
+      "properties": {
+        "deterministic": { "const": true },
+        "semantic": { "type": "boolean" }
+      }
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id", "severity", "source_page", "markdown_line", "markdown_column",
+          "issue_type", "description", "check_origin"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "severity": { "enum": ["error", "warning", "info"] },
+          "source_page": { "type": "integer", "minimum": 1 },
+          "markdown_line": { "type": "integer", "minimum": 1 },
+          "markdown_column": { "type": "integer", "minimum": 1 },
+          "issue_type": {
+            "enum": ["missing_content", "extra_content", "numeric_mismatch",
+              "structure_mismatch", "heading_level", "table_shape", "duplicated_header",
+              "ocr_low_confidence", "reading_order", "gross_divergence", "other"]
+          },
+          "description": { "type": "string", "minLength": 1 },
+          "check_origin": { "enum": ["deterministic", "semantic"] },
+          "source_location": { "type": "string" },
+          "expected": { "type": "string" },
+          "found": { "type": "string" },
+          "suggested_action": { "type": "string" },
+          "markdown_region": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["start_line", "start_col", "end_line", "end_col"],
+            "properties": {
+              "start_line": { "type": "integer", "minimum": 1 },
+              "start_col": { "type": "integer", "minimum": 1 },
+              "end_line": { "type": "integer", "minimum": 1 },
+              "end_col": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["error", "warning", "info", "gross_divergence"],
+      "properties": {
+        "error": { "type": "integer", "minimum": 0 },
+        "warning": { "type": "integer", "minimum": 0 },
+        "info": { "type": "integer", "minimum": 0 },
+        "gross_divergence": { "type": "boolean" }
+      }
+    }
+  }
+}

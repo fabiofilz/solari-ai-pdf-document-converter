@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://solari.local/schemas/correction-log-1.0.json",
+  "title": "CorrectionLog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_type", "schema_version", "generated_at", "tool_version",
+    "source_pdf", "source_sha256", "page_selection",
+    "original_markdown_file", "original_markdown_sha256_before",
+    "original_markdown_sha256_after", "corrected_markdown_file",
+    "input_report_file", "input_report_sha256",
+    "corrections", "unresolved", "revalidation"
+  ],
+  "properties": {
+    "record_type": { "const": "correction_log" },
+    "schema_version": { "const": "1.0" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "tool_version": { "type": "string", "minLength": 1 },
+    "source_pdf": { "type": "string", "minLength": 1 },
+    "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "page_selection": { "type": "string", "minLength": 1 },
+    "original_markdown_file": { "type": "string", "minLength": 1 },
+    "original_markdown_sha256_before": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "original_markdown_sha256_after": { "type": "string", "pattern": "^[a-f0-9]{64}$",
+      "description": "MUST equal *_before — the original is never modified (FR-041, SC-007)." },
+    "corrected_markdown_file": { "type": "string", "minLength": 1 },
+    "input_report_file": { "type": "string", "minLength": 1 },
+    "input_report_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "corrections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "resolves_issue_id", "markdown_region", "before", "after",
+          "rationale", "change_class"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "resolves_issue_id": { "type": "string", "minLength": 1 },
+          "markdown_region": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["start_line", "start_col", "end_line", "end_col"],
+            "properties": {
+              "start_line": { "type": "integer", "minimum": 1 },
+              "start_col": { "type": "integer", "minimum": 1 },
+              "end_line": { "type": "integer", "minimum": 1 },
+              "end_col": { "type": "integer", "minimum": 1 }
+            }
+          },
+          "before": { "type": "string" },
+          "after": { "type": "string" },
+          "rationale": { "type": "string", "minLength": 1 },
+          "change_class": {
+            "enum": ["restore_missing", "remove_extra", "fix_numeric", "fix_structure",
+              "fix_heading_level", "fix_table"]
+          }
+        }
+      }
+    },
+    "unresolved": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["issue_id", "reason"],
+        "properties": {
+          "issue_id": { "type": "string", "minLength": 1 },
+          "reason": { "enum": ["region_not_found", "ambiguous", "out_of_scope"] },
+          "note": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "revalidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["report_path", "report_sha256"],
+      "properties": {
+        "report_path": { "type": "string", "minLength": 1 },
+        "report_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    }
+  }
+}
