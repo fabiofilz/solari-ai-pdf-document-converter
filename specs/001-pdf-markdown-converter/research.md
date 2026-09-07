@@ -1,7 +1,20 @@
 # Phase 0 Research: Local-First PDF Document Converter
 
-All Technical Context items are resolved — no `NEEDS CLARIFICATION` remains. Each decision below
-follows the Decision / Rationale / Alternatives format.
+Each decision below follows the Decision / Rationale / Alternatives format.
+
+**Refreshed 2026-09-07 for Constitution v2.0.0 and the multi-path architecture.**
+The spec now describes independent extraction paths → reconciliation → semantic
+transformation → final fidelity validation, with a human-review workflow. Sections
+2–13 predate that model; each has been re-framed against v2.0.0 ("Simplicity &
+Justified Dependencies" — dependency count is not an objective) and against the
+current spec. Sections 20–23 are new (Docling, reconciliation design, human-review
+workflow, artifact persistence).
+
+**Open items requiring evidence or a later decision:**
+- **§4 — OCR engine** (Tesseract 5 vs RapidOCR/PP-OCR): benchmark-gated, **not run**, no default.
+- **§5 — OCR language detector** (langdetect vs lingua-py vs engine-native): re-open, decide on accuracy.
+- **§4a — LLM backend determinism**: strategy defined; the specific local backend's bit-reproducibility is confirmed at implementation time.
+- **§16 — Camelot/tabula for tables**: decide on measured multi-page-table fidelity vs the in-house stitcher.
 
 ---
 
@@ -23,24 +36,30 @@ below. 3.12 as the floor keeps the tool installable on current LTS-ish environme
 
 ---
 
-## 2. PDF text, layout, and table extraction
+## 2. Extraction path B — pdfplumber + pypdfium2 (independent geometric / evidence path)
 
-**Decision**: `pdfplumber` (MIT), which sits on `pdfminer.six`.
+**Decision**: `pdfplumber` (MIT, on `pdfminer.six`) is **extraction path B** (FR-060): an
+independent candidate carrying per-word literal text, exact bounding boxes, font metrics, a
+configurable table detector, and a purely geometric candidate reading order. `pypdfium2` (§3)
+supplies page dimensions / rotation and rasterization for path C.
 
-**Rationale**: Provides per-word bounding boxes, line grouping, font size/name/weight per
-character, and a configurable table detector — exactly the primitives needed for reading-order
-reconstruction (FR-015), heading-level inference (FR-017), artifact detection (FR-006..009), and
-table extraction (FR-020). Pure Python, permissive license, actively maintained, widely used.
+**Rationale**: Path B is the **deterministic geometric ground truth** of the pipeline. It is what
+reading-order reconciliation (FR-061d) uses to resolve orderings without the LLM, and what
+segment alignment (§21) uses to match segments across candidates. It is pure-Python, has no
+native surprises, and every value it produces is a plain coordinate — maximally diagnosable. It
+does not need to be the *best* extractor; it needs to be *independent, deterministic, and
+geometrically exact*, which it is.
 
 **Alternatives considered**:
-- *PyMuPDF (fitz)*: fastest and excellent text/layout, **rejected because it is AGPL-3.0**, which
-  is incompatible with this project's MIT license for distribution. This is the decisive factor.
-- *pypdf*: good for page ops and metadata, weak on layout coordinates and has no table support.
-- *pdfminer.six* directly: usable but low-level; `pdfplumber` is the ergonomic layer over it and
-  adds the table finder.
-- *Camelot / tabula*: strong table extraction but Camelot needs Ghostscript and tabula needs a
-  JVM — both violate the minimal-dependency and no-heavy-system-dep goals. `pdfplumber`'s table
-  finder is sufficient for the spec; revisit only if the acceptance corpus shows it failing.
+- *PyMuPDF (fitz)*: excellent, but **AGPL-3.0** — incompatible with this project's MIT license for
+  distribution. Decisive; unaffected by Constitution v2.0.0 (licensing is outside Principle VII).
+- *pypdf*: weak on layout coordinates, no table support — insufficient for a geometric evidence path.
+- *pdfminer.six directly*: `pdfplumber` is the ergonomic layer over it and adds the table finder.
+- Docling as the only extractor: rejected by the architecture — paths must be independent so one
+  technique's error cannot propagate (FR-060). Docling is **path A** (§20), not a replacement for B.
+
+**Note on Constitution v2.0.0**: path B is retained on its **role fit** (independent, deterministic,
+geometric), not because it is "lightweight". Weight is not the argument in either direction here.
 
 ---
 
@@ -50,58 +69,141 @@ table extraction (FR-020). Pure Python, permissive license, actively maintained,
 
 **Rationale**: Renders a PDF page to a raster image with no external binary (unlike
 poppler-backed `pdf2image`). Prebuilt wheels for all target platforms, fast, permissive license.
-Only used to feed Tesseract for pages that lack a text layer (FR-024) or mix text and image
-(FR-026).
+Only used to feed the OCR engine (§4) for pages or regions that lack reliable native text
+(FR-024) or mix text and image (FR-026).
+
+**Constitution v2.0.0 framing**: the choice is about **capability and operational surface**, not
+"lighter wins". `pypdfium2` renders faithfully, handles rotation, ships wheels for all target
+platforms, and needs **no system binary** — so it adds no install-time failure mode and no
+platform matrix to chase. That is the reason, independent of size.
 
 **Alternatives considered**:
-- *pdf2image*: requires the poppler command-line tools installed separately — extra system
-  dependency, worse portability.
-- *pdfplumber's `Page.to_image()`*: depends on the same poppler/Ghostscript stack under the hood.
-- *Wand / ImageMagick*: heavy native dependency; overkill for page rasterization.
-- Using PyMuPDF's rasterizer: rejected with PyMuPDF itself (AGPL).
+- *pdf2image / pdfplumber `Page.to_image()`*: both need the **poppler** CLI installed separately —
+  a real operational failure mode (missing binary, version skew), not merely "heavier".
+- *Wand / ImageMagick*: adds a large native dependency **and** a security-relevant image decoder
+  surface, for a task pypdfium2 already covers.
+- *PyMuPDF's rasterizer*: rejected with PyMuPDF itself (AGPL).
 
 ---
 
 ## 4. OCR engine
 
-**Decision**: `pytesseract` (Apache-2.0) driving the system `tesseract` binary (v5.5.3 present on
-the dev machine).
+> **SUPERSEDED — Constitution v2.0.0 (2026-09-07).** The prior decision (below) chose
+> `pytesseract`/Tesseract and rejected EasyOCR/PaddleOCR/docTR *primarily* because neural OCR
+> engines "pull large ML runtimes … a network + size + dependency cost that violates constitution
+> VII." Under the amended Principle VII ("Simplicity & Justified Dependencies"), runtime weight,
+> model size, and dependency count are **not** valid primary reasons to reject an OCR engine, and
+> the product objective is **maximum practical conversion fidelity**. The OCR engine choice is
+> re-opened and MUST be settled by a fidelity benchmark. No winner is chosen here.
 
-**Rationale**: The de-facto local, offline OCR engine. `pytesseract`'s `image_to_data` returns
-per-word confidence, which feeds "low-confidence OCR regions surfaced during validation"
-(FR-027). Supports explicit multi-language recognition via `-l lang1+lang2`. Fully local.
+### 4.0 Prior decision (superseded — retained for history)
 
-**Alternatives considered**:
-- *EasyOCR / PaddleOCR / docTR*: pull large ML runtimes (PyTorch / Paddle) and model downloads
-  on first run — a network + size + dependency cost that violates constitution VII and the
-  local-first default. Tesseract's language data is a small, offline apt/brew package.
-- *OCRmyPDF*: a great tool but it rewrites the PDF; this feature wants text + confidence extracted
-  into the Document model, not a new PDF.
+`pytesseract` (Apache-2.0) driving the system `tesseract` binary. EasyOCR / PaddleOCR / docTR
+were rejected for ML-runtime weight and first-run model downloads — **that rationale is no longer
+valid**. `pytesseract.image_to_data` returning per-word confidence, and `-l lang1+lang2`
+multi-language support, remain useful properties but are no longer decisive.
 
-**Note**: Tesseract itself and its language packs are the user's responsibility to install (same
-posture the spec takes for the local LLM). The tool detects a missing or unusable `tesseract` and
-reports it clearly rather than silently skipping OCR.
+### 4.1 New decision: benchmark-gated OCR engine selection
+
+**Decision**: The default OCR engine MUST NOT be selected primarily on dependency count, runtime
+size, or model size. It MUST be selected primarily on **measured extraction fidelity for the
+target document corpus**, via a technical evaluation that at minimum compares:
+
+- **Tesseract 5**
+- **RapidOCR** with an appropriate current PP-OCR model
+
+Other fully-local OCR engines MAY be added to the comparison where there is credible evidence
+they could materially improve fidelity.
+
+**Evaluation corpus** — MUST include representative difficult cases:
+Portuguese text with accents / diacritics; small text; numeric and monetary values; tables;
+degraded / scanned pages; image-only pages; mixed / hybrid PDF pages where applicable; and
+layouts representative of the project's target PDFs.
+
+**Benchmark criteria** — fidelity, not merely "text was returned":
+character / text accuracy; preservation of numeric values; Portuguese diacritics; table / cell
+text accuracy; reading-order behavior where applicable; behavior on degraded scans; false
+insertion and omission of content.
+
+**Selection rule**: the engine with the best demonstrated fidelity for the target corpus becomes
+the default, **unless another documented constraint** (e.g. license incompatibility, a platform
+the project must support, or a genuine local-first violation) materially outweighs the fidelity
+advantage. A secondary OCR engine MAY remain available as a fallback or as an additional
+reconciliation candidate / evidence source.
+
+**Constraints that carry over unchanged**:
+- OCR is a fully local-first, **independent extraction technique** (path C, FR-060); document
+  content is never sent to an external OCR service.
+- Model downloads from documented sources are allowed (Constitution v2.0.0, Technology & Security
+  Constraints) and must not exfiltrate document content.
+- OCR is invoked **only where native text is absent or insufficient** (FR-024 / FR-024a) — never
+  blindly replacing reliable native text.
+- Mixed / hybrid PDFs are supported (FR-024).
+- OCR output enters **extraction reconciliation** as another candidate / evidence source
+  (FR-060 / FR-061); the LLM may never rewrite OCR output (FR-026c / FR-061a); reconciliation may
+  only select an existing extracted candidate (FR-061a / FR-061b); a reconciliation conflict
+  below the configured 0.75 confidence threshold requires human review (FR-062).
+- Whatever engine is chosen, its per-word / per-token confidence is **normalized to a 0–100
+  scale** for FR-027 (default low-confidence threshold 70) — see §9a.
+
+**Status**: the benchmark has **NOT** been run and **no default engine is chosen**. As of
+2026-09-07 the repository contains no objective OCR benchmark evidence. `plan.md` / `tasks.md`
+must add the benchmark as a task; this section must be updated with the result and the chosen
+default (plus the fallback, if any) before OCR implementation begins.
+
+**Rejected for reasons still valid under v2.0.0**:
+- *OCRmyPDF*: rewrites the PDF; this feature needs text + confidence extracted into the model,
+  not a new PDF. (Functional mismatch — unaffected by the constitution change.)
+
+**Note**: whichever engine(s) are selected, their runtime / language data / models are installed
+or downloaded per that engine's documented mechanism; the tool detects a missing or unusable OCR
+engine and reports it clearly rather than silently skipping OCR.
 
 ---
 
 ## 5. OCR language selection
 
-**Decision**: Auto-detect per page with `langdetect` (Apache-2.0) on a first-pass OCR sample
-(fast, default English+osd pass), then re-run Tesseract with the detected language(s). Accept an
-optional `--ocr-lang` per-run override (one or more languages) that skips detection. Record the
-detected or overridden language(s) in the per-page OCR record (FR-027a).
+**Decision**: Auto-detect per page/region with `langdetect` (Apache-2.0) on a first-pass OCR
+sample, then re-run the OCR engine with the detected language(s). Accept an optional `--ocr-lang`
+per-run override (one or more languages) that skips detection. Record the detected or overridden
+language(s) in the OCR provenance for that page/region (FR-027a).
 
-**Rationale**: `langdetect` is tiny, offline, and covers the Latin-script languages the spec
-requires including Portuguese. Two-pass OCR (detect, then recognize) is a well-known pattern and
-keeps the common case zero-config while allowing an override for known-language documents.
+**Rationale**: `langdetect` is offline and covers the Latin-script languages the spec requires
+including Portuguese. Two-pass OCR (detect, then recognize) is a well-known pattern and keeps the
+common case zero-config while allowing an override for known-language documents.
+
+**Contingent on §4**: how a language is *passed* to the OCR engine depends on which engine wins
+the §4 benchmark — Tesseract takes `-l por+eng`; PP-OCR / RapidOCR models are script- or
+language-family-scoped and select a model rather than a language string. The lingua-py vs
+langdetect trade-off (lingua-py is more accurate on short text, langdetect is lighter) is also
+re-open under Constitution v2.0.0 and should be revisited if detection accuracy proves to
+materially affect OCR fidelity for the corpus.
+
+**Determinism**: `langdetect` seeds its RNG from the system clock by default, which would make
+detection — and therefore OCR output and the Markdown — non-reproducible, violating FR-053a /
+SC-009. The tool MUST set `langdetect.DetectorFactory.seed = 0` at import time so detection is a
+pure function of the input text.
+
+**Standalone `validate` / `fix`**: both re-derive text from the source PDF (§ deterministic
+validation) and so may run OCR. They MUST expose the same `--ocr-lang` override and
+`--ocr-confidence-threshold` option as `extract`, with identical defaults (auto-detect, 70) —
+FR-027b. `convert` already forwards both.
+
+**RE-OPEN under Constitution v2.0.0**: `langdetect` was chosen partly because `lingua-py` is
+"heavier" — no longer a valid reason. The detector is behind a `LanguageDetector` protocol; the
+**OCR benchmark (§4) includes a language-detection sub-metric** (per-page detected vs true
+language), and whichever of {`langdetect` seed-pinned, `lingua-language-detector`, the OCR
+engine's own language hint} scores best on the corpus becomes the default. Interim implementation:
+`langdetect` (seed-pinned), swappable.
 
 **Alternatives considered**:
-- *Tesseract OSD / `--psm 0`*: detects script and orientation, not specific language — not
-  enough to pick `por` vs `spa`.
-- *`lingua-py`*: more accurate on short text but a heavier dependency; `langdetect` is adequate
-  for page-sized samples.
-- *Always require the user to pass a language*: rejected — the spec wants auto-detection as the
-  default (clarification 2026-09-05).
+- *OCR-engine script / orientation detection* (e.g. Tesseract OSD `--psm 0`): detects script and
+  orientation, not specific language — not enough alone to pick `por` vs `spa`, but a useful
+  cross-check input.
+- *`lingua-language-detector`*: more accurate on short text; now a live candidate (weight is not a
+  disqualifier).
+- *Always require the user to pass a language*: rejected — auto-detection is the spec default
+  (clarification 2026-09-05); the `--ocr-lang` override remains.
 
 ---
 
@@ -115,12 +217,18 @@ keeps the common case zero-config while allowing an override for known-language 
 Word merged cells. Deeper-than-6 hierarchy levels map to `Heading 7..9` / styled list paragraphs
 (FR-017a). No external binary.
 
-**Alternatives considered**:
-- *pandoc* (installed on the dev machine): converts Markdown → DOCX in one call, but style
-  mapping is opinionated and merged-cell fidelity from HTML tables is unreliable. Adds a heavy
-  external binary as a hard runtime dependency. Rejected for the fidelity-critical path; could be
-  offered later as an optional alternative backend.
-- *Building OOXML by hand*: maximum control, far too much custom code (constitution VII).
+**Reproducible DOCX (FR-053a)**: a `.docx` is a zip and python-docx stamps `core.created` /
+`core.modified` and each zip entry's mod-time from the wall clock. The exporter MUST set the core
+`created`/`modified` properties to a fixed epoch and normalize zip entry timestamps (re-pack with
+a constant `date_time`) so identical inputs produce a byte-identical DOCX.
+
+**Alternatives considered** (Constitution v2.0.0 re-check):
+- *pandoc*: rejected on a **fidelity** ground that still holds — its Markdown→DOCX style mapping is
+  opinionated and its merged-cell fidelity from HTML `<table>` (FR-047) is unreliable. Binary size
+  is **not** the reason. python-docx gives per-element style control and real `cell.merge()`.
+  pandoc could be offered later as an optional alternative backend if a user wants it.
+- *Building OOXML by hand*: maximum control, far more custom code that is harder to validate than
+  a maintained library — the kind of fragile in-house implementation VII v2.0.0 steers away from.
 
 ---
 
@@ -143,46 +251,92 @@ contract tests, and gives clear errors when a record is malformed. Widely used, 
 
 ---
 
-## 8. Local LLM access (validate / fix semantic pass)
+## 8. Local LLM access (reconciliation candidate-selection + validation semantic pass)
 
-**Decision**: A thin `httpx` (BSD) client targeting an **OpenAI-compatible**
-`POST {base_url}/v1/chat/completions`. `base_url` and model name are configurable (env var / CLI
-flag / config file); default `http://localhost:11434/v1` (Ollama's OpenAI-compatible endpoint).
-Before any semantic work, probe availability (a cheap `GET {base_url}/models` or a tiny
-completion with a short timeout); if it fails, stop with a clear message and produce no partial
-report presented as complete (FR-038/046, SC-012).
+**Decision**: One thin `httpx` (BSD) client (`validate/llm_client.py`) targeting an
+**OpenAI-compatible** `POST {base_url}/v1/chat/completions`, shared by two analysis-only callers:
+`reconcile/llm_select.py` (candidate-selection, FR-061a) and `validate/semantic.py` (issue
+detection, FR-037). `base_url` and model name are configurable (CLI flag / env / config); default
+`http://localhost:11434/v1` (Ollama's OpenAI-compatible endpoint). Before any LLM work, probe
+availability; if it fails, stop with a clear message and no partial artifact presented as complete
+(FR-038/046, SC-012). `extract` never requires the LLM — without it, reconciliation is
+deterministic-only and residual disagreements become HUMAN_REVIEW_REQUIRED (FR-031/FR-066b).
 
-**Rationale**: The OpenAI chat-completions shape is implemented by every mainstream local runner
-— Ollama, llama.cpp `server`, LM Studio, vLLM — so the tool is not locked to one. A raw HTTP
-call needs no SDK, keeping the dependency count down (constitution VII). Everything stays on
-`localhost`; the no-egress test still passes because loopback is allowed by the guard.
+**Mid-run failure (FR-038a / FR-046a)**: an LLM that passes the probe but then fails during the
+semantic pass — connection reset, read timeout, HTTP 5xx, or a response body that does not parse
+into the expected issue list — is retried up to `SOLARI_LLM_RETRIES` times (default **2**, with
+a short backoff). If every attempt fails, the operation aborts with the *same* message and exit
+code (4) as an unavailable LLM and writes no validation report / corrected Markdown / correction
+log that would be treated as complete. Retry count does **not** affect output content, so it is
+not part of the deterministic `run_id` (§14).
+
+**Deterministic decoding**: the semantic request MUST send `temperature: 0` and, when the
+endpoint accepts it, a fixed `seed`, so a given `(model, Markdown, source pages)` yields a
+reproducible issue list (FR-053a). The `llm` block of the report records the model, `temperature`,
+and `seed` actually used. Residual non-determinism (an endpoint that ignores `temperature`, or a
+silently swapped model) cannot corrupt anything: it surfaces on re-run as a deterministic-name /
+different-content collision (exit 5, FR-054), never as a silent overwrite. `llm_model` *is*
+output-affecting and is folded into `run_id`.
+
+**Rationale (Constitution v2.0.0 — architecture, not weight)**: the OpenAI chat-completions shape
+is implemented by every mainstream local runner (Ollama, llama.cpp `server`, LM Studio, vLLM), so
+the tool is not locked to one backend and the model is **swappable without touching this codebase**
+— a separation-of-concerns and reproducibility win (the model id + decode params are pinned into
+`run_id`, §4a). An out-of-process LLM also keeps the fidelity-critical deterministic code (extract,
+transform, render) completely free of a heavy inference dependency and its failure modes.
+Everything stays on `localhost`; the no-egress guard allows loopback.
 
 **Alternatives considered**:
-- *Ollama-native API (`/api/chat`, `/api/tags`)*: slightly nicer model discovery, but ties the
-  tool to Ollama specifically. Rejected in favour of the portable interface (user decision
-  2026-09-07).
-- *`openai` Python SDK pointed at the local URL*: works, but adds a dependency (and its
-  transitive deps) purely for request shaping we can do in ~30 lines.
-- *`llama-cpp-python` in-process*: embeds the model runtime and GGUF loading into this tool —
-  large dependency, model-file management burden, worse separation than "user runs their own
-  server".
+- *Ollama-native API*: nicer model discovery but ties the tool to Ollama. Rejected for the
+  portable interface.
+- *`openai` Python SDK pointed at the local URL*: adds transitive deps for request shaping we do
+  in ~40 lines, with **no** fidelity, validation, or diagnosability benefit — a dependency that
+  buys nothing for this use, which VII v2.0.0 still rejects (it forbids *unjustified* additions).
+- *`llama-cpp-python` in-process*: couples model-file management and a large native inference
+  dependency into this tool and its process. The objection is **architectural** (separation of
+  concerns; the LLM should be replaceable; the deterministic pipeline should not import an
+  inference runtime), not "large dependency". "User runs their own server" is the cleaner boundary.
 
 ---
 
 ## 9. CLI framework
 
-**Decision**: stdlib `argparse` with `add_subparsers` for the five operations. Shared options
-(`--pages`, `--output-dir`, `--llm-base-url`, `--llm-model`, `--ocr-lang`) are factored into
-helper functions that add them to each subparser.
+**Decision**: stdlib `argparse` with `add_subparsers` for the **six** operations (`extract`,
+`validate`, `fix`, `export`, `convert`, `review`). Shared-option helpers add `--pages`,
+`--output-dir`, `--json`, the OCR options, the LLM options, `--reconcile-confidence-threshold`,
+`--gross-divergence-threshold`, and `--resolution-store` to the relevant subparsers.
 
-**Rationale**: Zero dependencies — the strictest reading of constitution VII. Five subcommands
-with a handful of options each is well within argparse's comfortable range. Exit codes and
-`--help` text are fully controllable.
+**Rationale (Constitution v2.0.0)**: CLI parsing is not product-quality-critical and argparse is
+**sufficient** for six subcommands with a handful of options each; exit codes and `--help` text
+are fully controllable. This is "the simplest tool that meets the requirement", not "fewest
+dependencies wins" — if the CLI grew to need rich interactive prompts for `review`, a small TUI
+dependency (e.g. `prompt_toolkit`) would be justified under VII v2.0.0 for the UX benefit; it is
+not needed for a file/flag-driven `review`.
 
 **Alternatives considered**:
-- *Typer / Click*: nicer ergonomics and less boilerplate, but each adds a dependency for what
-  argparse already does here. Rejected (user decision 2026-09-07).
+- *Typer / Click*: nicer ergonomics, but no product-quality benefit for this CLI shape.
 - *docopt*: unmaintained.
+
+---
+
+## 9a. OCR low-confidence threshold
+
+**Decision**: Treat an OCR span as low-confidence when its minimum per-word / per-token confidence
+— **normalized to a 0–100 scale regardless of OCR engine** (§4) — is below **70**. Expose a
+per-run `--ocr-confidence-threshold` option restricted to 0–100; the configured value flows into
+deterministic validation.
+
+**Rationale**: 70 is a conservative default that surfaces uncertain recognition for review while
+avoiding warnings for ordinarily clear text. Using the minimum confidence protects short but
+material values such as amounts and clause identifiers. Making it configurable accommodates poor
+scans, languages, and typefaces without silently changing the project-wide default. The
+normalized scale keeps the threshold meaningful whichever engine §4 selects (Tesseract reports
+0–100 per word; PP-OCR / RapidOCR report 0–1 per line/box — these are mapped onto 0–100, and the
+mapping is documented once the engine is chosen).
+
+**Alternatives considered**:
+- *Fixed threshold*: simpler, but cannot adapt to document quality or language packs.
+- *Mean confidence only*: can hide a single low-confidence word inside an otherwise clear span.
 
 ---
 
@@ -218,7 +372,7 @@ existing work is never touched and they are told exactly what happened.
 `os.replace()`-d into place only after it is fully written and (for JSON records) re-parsed to
 confirm validity. On any mid-run failure — including resource exhaustion — no partially written
 file is left at a final artifact path, and the traceability record is written last so it never
-references an incomplete artifact (SC-014, FR-058).
+references an incomplete artifact (SC-016, FR-058).
 
 **Rationale**: `os.replace` is atomic on POSIX and Windows within the same filesystem. Writing
 the temp file in the *destination* directory (not `/tmp`) keeps the rename on one filesystem and
@@ -267,8 +421,428 @@ acceptance-corpus tests, not the default suite.
 
 ---
 
-## Outstanding items for Phase 1
+## 14. Deterministic run identifier and reproducible audit records
 
-None blocking. Phase 1 refines: the exact `ValidationIssue` field set and enum values, the
-heading-level inference algorithm's thresholds, and the multi-page table stitching heuristics —
-all captured in `data-model.md` and the contract schemas.
+**Decision**: No audit record embeds a wall-clock timestamp or a randomly generated identifier
+in its persisted body. The common envelope drops `generated_at` and carries a single `run_id`
+that is a pure function of the inputs:
+
+```
+run_id = sha256(
+    source_sha256 + "\n" +
+    normalized_page_selection + "\n" +      # e.g. "2_5-7_10-12" or "all"
+    tool_version + "\n" +
+    canonical_json(output_affecting_config) + "\n" +
+    applicable_resolution_digest            # sha256 over the sorted applicability-keys +
+).hexdigest()[:16]                          #   selected values/orderings replayed this run
+```
+
+`output_affecting_config` is the sorted-key JSON of only the settings that change artifact bytes:
+`ocr_engine`, `ocr_languages_override` (list or null), `ocr_confidence_threshold` (int),
+`reconcile_confidence_threshold` (float), `gross_divergence_threshold` (float — `validate`/`convert`
+records only), `llm_model` + `llm_decode` (`{temperature, seed}`) for LLM-dependent records.
+Timeouts, retry counts, `base_url`, output directory, `--resolution-store` path, and `--json` are
+**excluded** — they do not affect content.
+
+`applicable_resolution_digest` (FR-053a / FR-071) folds in every `human_confirmed` resolution the
+run actually replayed: for each, its applicability key and its selected value / ordering. So
+`(source, config, applicable resolutions)` fully determines the bytes — resolving a review item
+and re-running changes the digest and yields a new, still-reproducible artifact; an unchanged
+re-run replays the same resolutions and is a byte-identical no-op. Resolutions that exist in the
+store but do **not** apply to this run (different source hash, incompatible config) contribute
+nothing.
+
+With identical inputs every artifact (`original Markdown`, `DOCX`, and all four records) is
+byte-identical across runs, so a re-run is a satisfied no-op rather than a spurious collision
+(FR-053a, FR-054, SC-009). `tool_version` stays a separate human-readable envelope field.
+
+**Rationale**: reproducibility turns the no-overwrite rule and SC-009 from "aspirational" into a
+byte-level test (`sha256(run1) == sha256(run2)`). A content-derived id also doubles as a cheap
+integrity/version check and lets the traceability record point at each artifact by a stable name.
+
+**Alternatives considered**:
+- *Keep `generated_at` / uuid `run_id`, compare records "semantically" on collision* (ignore a
+  documented volatile-field allowlist): works, but every consumer and test then needs the same
+  allowlist logic, and "semantic equality" of JSON is a second source of truth. Rejected as more
+  complex than removing the volatile fields.
+- *Keep volatile fields, treat any pre-existing record as a hard collision (exit 5)*: makes
+  repeated `convert` unusable and breaks the idempotency the spec now requires. Rejected.
+- *Record the wall-clock time in a sidecar `.runmeta` file outside the record*: still
+  non-reproducible bytes on disk for the run, still collides. Rejected.
+
+## 15. Gross-divergence metric for `validate`
+
+**Decision**: `validate` computes a **source-text match rate** = (extractable source-text tokens
+from the selected pages that are found, in order-independent bag comparison with light
+normalization, in the Markdown) ÷ (total extractable source-text tokens from the selected pages).
+When `match_rate < gross_divergence_threshold` (default **0.5**, `--gross-divergence-threshold`,
+range 0–1) the report:
+
+- sets `summary.gross_divergence = true` and records `summary.source_text_match_rate` and
+  `summary.gross_divergence_threshold`;
+- emits exactly one issue with `issue_type = "gross_divergence"` stating the observed rate;
+- still runs and lists **structural** deterministic checks (heading/table shape) but **suppresses**
+  per-token `missing_content` / `extra_content` / `numeric_mismatch` issues (which would be
+  thousands of lines of noise for a mismatched pair);
+- skips the semantic LLM pass (no value comparing unrelated documents; also avoids the cost).
+
+Above the threshold, behaviour is unchanged — the full issue list is produced.
+
+**Rationale**: a single ratio is cheap (it is a by-product of the source-coverage check the
+deterministic validator already performs for SC-001), explainable to a user, and directly
+testable (SC-017). 0.5 is a deliberately low bar: normal extraction noise sits well above 90%
+match, so only a genuinely wrong pairing trips it.
+
+**Alternatives considered**:
+- *Always emit the full per-token report, just add a flag*: leaves the user scrolling thousands
+  of issues to discover the documents don't match. Rejected.
+- *Fixed, non-configurable threshold*: corpora with heavy OCR or heavy artifact removal may sit
+  lower; a per-run override costs nothing. Rejected in favour of configurable-with-default.
+- *Structural-alignment score instead of text ratio*: harder to explain and to ground-truth than
+  "what fraction of the words are even present". Rejected.
+
+## 4a. LLM determinism strategy (resolves the reproducibility tension)
+
+**Decision**: The externally observable reconciliation and validation results MUST be
+reproducible even when the local LLM backend is not bit-deterministic. Layers:
+
+1. **Request pinning** — every LLM call (reconciliation selection, validation semantic pass) sends
+   `temperature: 0` and a fixed `seed`; the client records `model` id + `{temperature, seed}` and
+   these are folded into `run_id` (§14). Different model or decode params ⇒ different `run_id` ⇒ a
+   legitimately different (still reproducible) artifact.
+2. **The programmatic guard makes the *reconciliation* result a bounded choice** (§21): the LLM
+   only ever returns a *selection* among a fixed, finite candidate set (a value index, or an
+   ordering that must equal a candidate order / a geometry-supported order). Even a backend that
+   ignores `temperature` can only pick one of N fixed options; it can never introduce new bytes.
+3. **Flip detection** — during reconciliation the selection call is issued **twice** (cheap; same
+   prompt). If the two selections disagree, the decision is treated as **not confident enough**
+   regardless of the reported score → apply the deterministic tie-break (prefer the
+   geometry-supported / majority candidate) if one exists, else **HUMAN_REVIEW_REQUIRED**. This
+   converts backend nondeterminism into an explicit, auditable review rather than a silent flip.
+4. **Resolution replay** — once a conflict is `human_confirmed`, it never goes back to the LLM
+   (FR-071); its outcome is a deterministic input.
+5. **Two-level validation reproducibility (FR-053a + FR-053b)** — the report has two parts:
+   - **Deterministic section** (`check_origin: "deterministic"`: SC-001 coverage, numeric
+     integrity, table shape, reading-order check, gross-divergence, OCR low-confidence) — **always
+     byte-reproducible** for identical effective inputs, and part of the FR-053a deterministic
+     core.
+   - **Semantic section** (`check_origin: "semantic"`: the local-LLM issue pass) — governed by
+     **FR-053b**. At probe time the client determines whether the backend honours `seed` (a tiny
+     fixed prompt issued twice — identical responses ⇒ `deterministic`, else `best_effort`) and
+     writes `llm.reproducibility` into the report (and the traceability record's `llm_used`).
+     - `deterministic` ⇒ the semantic section is byte-identical across runs for identical inputs.
+     - `best_effort` ⇒ the tool does **not** claim byte reproducibility for a *newly generated*
+       semantic section. Instead, `pipeline/validate` first looks for an **already-persisted**
+       validation report for the identical applicability context
+       (`sha256(markdown_sha256 ⧺ source_sha256 ⧺ normalized_selection ⧺ llm_model ⧺
+       canonical_json(llm_decode))`) and, if found and valid, **replays its semantic section**
+       verbatim rather than regenerating it. A re-run therefore reproduces the same report bytes
+       *by replay*, and never raises a name collision for a would-be regeneration. Regeneration
+       happens only when no persisted report matches (first run, or a changed context).
+
+**`run_id` is unchanged and stays deterministic** — it folds `llm_model` + `llm_decode` but **not**
+the semantic-issue *content* (which is not a pure function of those on a `best_effort` backend). The
+report's byte identity on a re-run comes from **replay**, not from `run_id`.
+
+**Rationale**: FR-053a's deterministic core is genuinely byte-reproducible; FR-053b makes the
+LLM-assisted part honest (`deterministic` when the backend earns it, `best_effort` + replay
+otherwise) without weakening any guard or the source-backed-content invariant, and without a
+wall-clock/random workaround. The double-call flip check turns "the model waffled" during
+*reconciliation* into a review item; the persisted-report replay turns "the model waffled" during
+*validation* into a reproduced artifact.
+
+**Alternatives considered**:
+- *Require a deterministic backend*: not enforceable across Ollama / llama.cpp / vLLM builds.
+- *Cache the first LLM answer forever, keyed by prompt hash*: hides model changes and makes the
+  cache a hidden source of truth — rejected (FR-071 wants explicit, auditable inputs; a
+  prompt-hash cache of *selections* keyed into `run_id` is acceptable as an optimisation but not
+  the correctness mechanism).
+
+---
+
+## 16. Multi-page tables — Camelot / tabula re-evaluation
+
+**Decision (interim, evidence-gated)**: Keep `pdfplumber`'s table detector + an in-house
+multi-page stitcher (`transform/tables.py`) as the baseline. Add **Camelot** (`camelot-py`,
+MIT; `lattice` + `stream` flavours) to the **acceptance table-fidelity benchmark** (part of the
+corpus scoring, SC-003). Adopt Camelot as an additional table-extraction input **iff** it
+measurably reduces lost rows / lost columns / merged-cell errors on the corpus versus the
+baseline. `tabula-py` stays rejected (needs a **JVM** — a genuine operational failure mode and a
+second language runtime, not merely "heavy").
+
+**Rationale (Constitution v2.0.0)**: the old rejection leaned on "minimal-dependency / no heavy
+system dep". Under v2.0.0 that is not sufficient — Camelot needs **Ghostscript** (a local binary,
+no egress), which is an operational cost to weigh against a *measured* table-fidelity gain, not an
+automatic disqualifier. But there is no evidence yet that the baseline is insufficient, so the
+decision is: benchmark it, adopt only on demonstrated benefit. Tables feed reconciliation as
+structure/geometry within the existing candidates; a Camelot table would be additional evidence
+for `transform/tables.py`, not a fourth top-level extraction path.
+
+**Alternatives considered**:
+- *Adopt Camelot now, unconditionally*: premature — adds Ghostscript for an unproven gain.
+- *tabula-py*: JVM dependency — real operational and packaging cost; rejected.
+
+---
+
+## 20. Docling — extraction path A (why it is in; what it is authoritative for)
+
+**Decision**: `docling` (MIT, IBM) is **extraction path A** (FR-060). It processes the original
+PDF directly and produces one `ExtractionCandidate` with three separable outputs:
+
+1. **Literal content** — text of its detected regions, as source-backed segments with geometry.
+   Reconciled by literal-content reconciliation alongside paths B and C (FR-061).
+2. **Candidate reading order** — Docling's reading-order inference over its segments. This is
+   **evidence for reading-order reconciliation** (FR-061d), never adopted implicitly (FR-060b /
+   FR-015). It competes with path B's geometric order and path C's order.
+3. **Structural hints** — Docling's heading / list / table detection, attached to segments as
+   `StructuralHint` evidence. **Carried through reconciliation unaltered and unapplied**
+   (FR-061c); only `transform/structure.py` / `transform/tables.py` may accept, reject, or apply a
+   hint, and MUST record which it used (FR-064, SC-026).
+
+**Rationale (Constitution v2.0.0)**: Docling gives materially better structure and reading-order
+*evidence* on the complex, multi-column, legal-style layouts this tool targets than pure geometry
+can, and it replaces a large body of fragile in-house column-detection / heading-inference
+heuristics with a maintained, inspectable component — a fidelity **and** diagnosability gain. Its
+operational cost is real (a deep-learning runtime — `torch` or `onnxruntime` — plus layout models,
+one-time download) and is documented and accepted; it is fully local after the fetch (Principle V).
+
+**Guardrails**:
+- Docling's structural interpretation is **never authoritative** during extraction/reconciliation
+  (FR-060b, SC-026). A test asserts the CED for a "Docling-only heading" fixture holds the text as
+  literal content + an attributed hint, with the heading decision made (and recorded) only in
+  stage 3.
+- Docling runs in its **own path module** with no import to/from paths B or C (import-graph test).
+- If Docling errors on a page, path A is marked `partial`/`failed` for that page and the other
+  paths still produce candidates (FR-060, edge case; test).
+- Docling model version is pinned; the download source is documented in quickstart; the no-model-
+  download-at-run-time test asserts the cache is populated ahead of a run.
+
+**Alternatives considered**:
+- *Hand-built layout analysis*: the fragile-heuristics path VII v2.0.0 explicitly steers away from.
+- *`unstructured` / `marker` / `nougat`*: also heavy; Docling is MIT, actively maintained, and its
+  output cleanly separates the three concerns above. Could be added as a fourth path later if a
+  benchmark shows a fidelity gap.
+- *Making Docling the sole extractor*: violates FR-060 independence — its errors would propagate.
+
+---
+
+## 21. Reconciliation layer design
+
+**Decision**: `reconcile/` implements deterministic-first reconciliation with LLM
+candidate-selection only, in this order:
+
+**a. Segment identity & alignment (`align.py`, deterministic).** Each candidate's segments get a
+stable `segment_id` derived from `(page, rounded bbox, normalized-text hash)`. Cross-candidate
+alignment groups segments that describe the same region by geometric overlap (bbox IoU ≥ a
+configured threshold) plus normalized-text similarity (token Jaccard) as a tie-break. Output:
+`AlignedSegmentGroup`s, each holding 1–3 candidate segments. A group with segments from only one
+candidate is still a group (that candidate is the sole evidence there).
+
+**b. Literal-content reconciliation (`literal.py`).** Per group:
+- normalize each candidate's text for **comparison only** (whitespace collapse, Unicode NFC, quote
+  folding) — the *accepted* value is always a candidate's **verbatim** text, never the normalized
+  form;
+- if the normalized texts are equal → `deterministic_agreement`, accept any candidate's verbatim
+  text (prefer native over OCR when both present and equal after normalization);
+- else compute a **material-disagreement** signal: token-level edit distance ratio + whether the
+  disagreement is only in whitespace/casing (not material) vs digits/letters (material). Only
+  material disagreements go further.
+- **confidence** = a deterministic function of {agreement fraction among candidates, whether one
+  candidate is native-text vs all-OCR, character-class of the diff, OCR confidence of the OCR
+  candidate}. ≥ threshold (default 0.75) → LLM selection; < threshold → HUMAN_REVIEW_REQUIRED.
+
+**c. Reading-order reconciliation (`reading_order.py`).** Over the accepted segments:
+- each candidate contributes an order (path B: geometric; path A: Docling; path C: OCR order);
+- **deterministic geometric resolver**: detect columns (x-gap clustering), then order
+  top-to-bottom within each column, columns left-to-right; if every candidate order equals the
+  geometric order (or all candidate orders agree) → `deterministic_agreement`;
+- else material disagreement (Kendall-τ distance between candidate orders above a threshold, and
+  the geometric resolver not unambiguous) → confidence → LLM selects an **existing candidate
+  order or the geometric order**, or HUMAN_REVIEW_REQUIRED.
+
+**d. Programmatic guard (`guard.py`).** The LLM returns a structured selection (a candidate id /
+index, or an ordering as a list of `segment_id`s). The guard checks: selected literal value is
+**byte-identical** to some candidate's verbatim text; selected ordering is **exactly** some
+candidate order or the geometry-supported order. Any mismatch → response rejected → conflict
+unresolved → HUMAN_REVIEW_REQUIRED (FR-061b). Plus the double-call flip check (§4a).
+
+**e. Decision paths & log.** Every group/ordering yields a `ReconciliationDecision`
+(`deterministic_agreement` | `llm_selected` | `human_confirmed`) recorded in the
+`ReconciliationLog` with competing candidates, sources, method, selected value/ordering,
+confidence (for `llm_selected`), and resolution-store ref (for `human_confirmed`).
+
+**f. Resolution replay (`resolutions.py`).** Before raising a review item, check the resolution
+store for a record whose applicability key matches (§22); if found, apply it as `human_confirmed`
+(replayed) and log it. If the item would otherwise be auto-resolvable but a stored resolution
+exists for a *changed* context, the stored one does **not** match the key and is not used — a
+fresh item is raised (FR-071).
+
+**Invariant (tested)**: an automatic reconciliation result never contains literal source text
+absent from the allowed candidates — `assert selected_value in {c.verbatim_text for c in
+group.candidates}` on every `deterministic_agreement` / `llm_selected` decision (SC-020).
+
+**Alternatives considered**:
+- *LLM does the whole reconciliation in one pass* (reads all candidates, emits the merged doc):
+  rejected outright — it would author text (FR-029/FR-061a). The LLM only ever selects.
+- *Always require unanimous agreement, else human review* (no LLM at all): simpler and fully
+  deterministic, but pushes far too much to humans on documents where two of three paths agree.
+  The LLM-selection tier (≥ 0.75) is the pragmatic middle; the guard keeps it safe.
+- *Confidence from the LLM's own self-report only*: unreliable; the deterministic signal (native
+  vs OCR, char class, agreement fraction) is the primary input, the LLM's score is secondary, and
+  the flip check overrides both.
+
+---
+
+## 22. Human-review workflow design
+
+**Decision**: A `review` subcommand plus a file-based queue and an append-only store.
+
+- **Queue**: `<base>.human-review-queue.json` (+ `.md`). Written by `extract`/`convert` when items
+  are open. Each item: `id` (deterministic from applicability key), `conflict_type`, the FR-062a
+  or FR-062d evidence fields, `status: open`.
+- **`review list [--output-dir DIR]`** — prints open items (id, page, type, one-line summary).
+- **`review show <id>`** — prints the full evidence for one item (each candidate's value/order,
+  bboxes, sources, confidence) so the reviewer can compare against the PDF.
+- **`review resolve <id>`** — one of:
+  - `--select <n>` : accept candidate *n* as supplied (literal conflict);
+  - `--value <TEXT>` (or `--value-file PATH`) : enter a verified literal value (literal conflict,
+    no candidate correct — FR-068); records `manually_verified: true`;
+  - `--order <segId,segId,...>` : accept an ordering of the existing segment ids (reading-order
+    conflict — FR-069). The ids MUST be exactly the item's segment set (validated).
+  Appends a `HumanReviewResolution` record to the store and marks the queue item `resolved`.
+- **Resume**: re-running `extract`/`convert` with the same inputs finds the resolutions via the
+  applicability key, replays them as `human_confirmed`, and (if no items remain open) completes to
+  the final Markdown. No Markdown hand-editing (FR-072).
+
+- **Applicability key** (FR-071): `sha256(source_sha256 ⧺ conflict_type ⧺ canonical(page, bbox
+  region, aligned candidate-value set) ⧺ canonical_json(output_affecting_config_subset))`. The
+  `output_affecting_config_subset` is the config that could change *this* conflict's evidence:
+  `ocr_engine`, `ocr_languages_override`, `ocr_confidence_threshold`, and the set of enabled
+  extraction paths. Page selection is **not** in the key directly (the region + source hash pin
+  it), so resolving a conflict on page 5 in a `--pages 1-10` run still applies in a `--pages 5`
+  run — but a page-selection change that removes the region means the conflict never arises.
+- **Store**: `resolutions.jsonl` + generated `resolutions.md`. Append-only (FR-057b): a
+  re-resolution of the same key is a new line; replay uses the **last** record for a key. Default
+  location: `<output-dir>/../resolutions.jsonl`; overridable with `--resolution-store PATH` (e.g. a
+  project-wide store shared across documents).
+
+- **Exit codes**: `extract`/`convert` exit **6** ("human review required — run incomplete") when
+  they stop at the queue; `review resolve` exits 0 on success, 2 on a bad selection/order.
+
+- **`fix` → review routing** (FR-045a): when `fix` reads a `reconciliation_error` issue, it does
+  not edit the Markdown; it writes/updates a human-review queue item for the underlying conflict
+  (reconstructed from the validation report's source location + reconciliation log) and reports
+  "N issue(s) routed to human review; re-run `extract`/`convert` after resolving". `fix` still
+  applies any `disallowed_transformation` corrections in the same run.
+
+**Alternatives considered**:
+- *Interactive TUI for `review`*: better UX, but a file/flag interface is scriptable, diffable,
+  testable, and reproducible; a TUI can be layered on later (VII v2.0.0 would justify a small TUI
+  dep for the UX gain, but it is not needed for correctness).
+- *Store resolutions inside the per-run output dir only*: then a re-run in a fresh dir loses them.
+  A durable, relocatable store keyed by content is the point.
+- *Let the LLM propose a resolution for the human to approve*: acceptable as a UX hint later, but
+  the human's decision is authoritative and the LLM must not be in the persisted `human_confirmed`
+  provenance.
+
+---
+
+## 23. Intermediate-artifact persistence
+
+**Decision**: persist what auditability / replay / resume / diagnosis need; regenerate the rest.
+
+| Artifact | Persisted? | Why |
+|---|---|---|
+| **Extraction candidates** (per path) | **Yes, JSON only** — the machine-readable source of truth. **No `.md` companion.** | Needed to re-present evidence on resume, for `applicable_resolution_digest`, and for diagnosing which path erred. The **reconciliation log's `.md` rendering** is the human-facing diagnostic for what each path produced per conflict; a candidate is not a converted-document format and does not warrant a second representation (M1). A future `--dump-candidate` diagnostic MAY render one read-only, clearly non-authoritative. Reproducible per path (modulo the OCR engine + langdetect seed). |
+| **Canonical Extracted Document** | **Yes, JSON only.** No `.md` companion. | The reconciliation state a resume run continues from; the input final validation checks against. Same rationale as candidates — the reconciliation log's `.md` is the human-facing view. |
+| **Reconciliation log** | **Yes**, JSON + `.md` (FR-057) | Audit trail of every decision (Principle IV). |
+| **Structural hints** | Inside candidates + CED | Not a separate artifact — they are attributed fields on segments. |
+| **Human-review queue** | **Yes**, JSON + `.md` | The `review` command reads it; blocks delivery. |
+| **Resolution store** | **Yes**, append-only JSONL + `.md`, durable across runs | FR-057b; the deterministic replay input. |
+| **Semantic document** | **No** (ephemeral) | Deterministically regenerable from the CED by stage 3; persisting it would be a duplicate source of truth. A `--dump-semantic` diagnostic flag MAY write it, clearly marked non-authoritative. |
+| **Removal log** | **Yes** (existing) | FR-011. |
+| **Validation report** | **Yes** (existing) | FR-032. |
+| **Correction log** | **Yes** (existing) | FR-042. |
+| **Traceability record** | **Yes**, `convert` only (existing) | FR-052; now also links the reconciliation log + queue. |
+| **Original / corrected Markdown, DOCX** | **Yes** (existing) | The deliverables. |
+
+Candidates + CED live under `<output-dir>/intermediates/` (or a working dir); they are still
+subject to the atomic-write + no-overwrite + reproducible rules.
+
+### v1 decision — intermediate persistence is always on (no `--no-intermediates`)
+
+`extract` (and `convert`) **always** write the extraction candidates and the Canonical Extracted
+Document as authoritative JSON intermediate artifacts, and always write the reconciliation /
+human-review / audit intermediates required by the persistence policy above. These artifacts are
+**required** for provenance (FR-063 / FR-066), diagnostics (which path erred), deterministic
+replay (`applicable_resolution_digest`, FR-071), human review and resume (FR-072), failure
+analysis, and reproducibility (FR-053a). **v1 intentionally provides no `--no-intermediates`
+mode** — there is no supported way to suppress these artifacts, and this is a deliberate
+architectural decision rather than an unimplemented option. **Disk usage is an accepted trade-off
+for v1.** A future retention / cleanup policy (age-based pruning, opt-in compaction for
+zero-review runs, an external janitor) MAY be designed separately, but only in a way that does
+**not** weaken auditability or reproducibility; it is out of scope here and is **not** a v1
+feature requirement. The additive, clearly-non-authoritative diagnostic dumps mentioned above
+(`--dump-candidate`, `--dump-semantic`) are the opposite of this — they *add* optional output,
+they never remove the required intermediates.
+
+**Alternatives considered**:
+- *A `--no-intermediates` flag for zero-review runs*: rejected for v1 — it creates a mode in
+  which a run cannot be audited, replayed, or diagnosed after the fact, directly weakening
+  Principle IV and FR-053a/FR-071; the disk cost of keeping them is the cheaper trade-off.
+- *Persist the semantic document too*: rejected — duplicate source of truth, and it is cheap to
+  regenerate.
+- *Keep everything in memory and only write final artifacts*: breaks resume (the queue + CED must
+  survive process exit) and diagnosis.
+
+---
+
+## 24. Native-text reliability assessment — placement and boundary (M2)
+
+**Decision**: `extract/native_reliability.py` is an **extraction-routing / evidence component**,
+not a fourth extraction path and not a consumer of any path's output. Its job: for each page /
+region, decide whether the native text layer is reliable, or whether OCR (path C) must run there
+(FR-024 / FR-024a). It reads **low-level native-text evidence directly from the source PDF / page
+representation** via `pdf/loader` (raw `pdfplumber`/`pdfminer` primitives on the source handle):
+native-text coverage vs the rendered page image area, encoding-gibberish / mojibake detection,
+ToUnicode / CMap sanity, per region.
+
+**It MUST NOT** take a Docling, pdfplumber, or OCR `ExtractionCandidate` as input — that would
+make path C depend on another path's output and break FR-060 / SC-024. Conceptual dependency
+direction:
+
+```
+source PDF ──▶ native-text reliability assessment ──▶ (which/where OCR is required)
+source PDF ──▶ Docling candidate                    (independent)
+source PDF ──▶ pdfplumber + pypdfium2 candidate     (independent)
+source PDF / region ──▶ OCR candidate               (independent; region chosen by the assessment)
+```
+
+Sharing the `pdfplumber`/`pdfminer` **library** on the source handle is fine — it is not consuming
+`plumber_path.py`'s produced candidate. The extraction-independence architecture test asserts
+`extract/native_reliability` and `extract/ocr_path` import **neither** `extract/plumber_path` nor
+`extract/docling_path`, and that a fault injected into any path's candidate does not change the
+reliability classification or the OCR-trigger decision.
+
+**Rationale**: the assessment needs the *raw* native layer, not a path's interpretation of it; and
+keeping it upstream of and independent from the three paths is what lets "one technique's error
+cannot propagate" (FR-060) actually hold for the OCR-triggering decision.
+
+**Thresholds** (coverage ratio, gibberish score, etc.) are **corpus-tuned**, not fixed here — see
+the Outstanding items list and the tuning task.
+
+---
+
+## Outstanding items for Phase 1 / gated on evidence
+
+- **§4 OCR engine** — benchmark not run; no default. `/speckit-tasks` places the benchmark before
+  any OCR-engine-hardcoding task.
+- **§5 language detector** — langdetect vs lingua-py vs engine-native; decide on the OCR benchmark's
+  language-detection sub-metric.
+- **§4a** — confirm the chosen local LLM backend's behaviour under `seed`; document the reference
+  backend in quickstart.
+- **§16 Camelot** — decide after the table-fidelity corpus scoring.
+- **Phase 1 refinements** (in `data-model.md` / contracts): exact `ValidationIssue` enum values;
+  heading-inference thresholds; table-stitch heuristics; match-rate token normalization;
+  `output_affecting_config` serialization; bbox IoU + Jaccard thresholds for alignment; Kendall-τ
+  threshold for reading-order disagreement; the confidence functions (literal & reading-order).

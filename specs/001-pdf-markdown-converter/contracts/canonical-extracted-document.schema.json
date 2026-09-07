@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://solari.local/schemas/canonical-extracted-document-2.0.json",
+  "title": "CanonicalExtractedDocument",
+  "description": "Stage-2 reconciliation output (FR-063). Pre-semantic-transformation. Never mutated in place.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_type", "schema_version", "run_id", "tool_version",
+    "source_pdf", "source_sha256", "page_selection",
+    "state", "accepted_segments", "accepted_reading_order",
+    "carried_structural_hints", "page_classes"
+  ],
+  "properties": {
+    "record_type": { "const": "canonical_extracted_document" },
+    "schema_version": { "const": "2.0" },
+    "run_id": { "type": "string", "pattern": "^[a-f0-9]{16}$" },
+    "tool_version": { "type": "string", "minLength": 1 },
+    "source_pdf": { "type": "string", "minLength": 1 },
+    "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "page_selection": { "type": "string", "minLength": 1 },
+    "state": { "const": "pre_semantic_transformation" },
+    "accepted_segments": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["segment_id", "text", "source", "contributing_techniques", "decision"],
+        "properties": {
+          "segment_id": { "type": "string", "minLength": 1 },
+          "text": { "type": "string", "description": "verbatim; equals some contributing candidate's text (SC-020)" },
+          "source": {
+            "type": "object", "additionalProperties": false,
+            "required": ["physical_page", "origin_kind"],
+            "properties": {
+              "physical_page": { "type": "integer", "minimum": 1 },
+              "bbox": { "oneOf": [ { "type": "null" }, { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 } ] },
+              "origin_kind": { "enum": ["native_text", "ocr"] },
+              "ocr_languages": { "type": "array", "items": { "type": "string" } },
+              "ocr_confidence": { "type": ["number", "null"] }
+            }
+          },
+          "contributing_techniques": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "decision": {
+            "type": "object", "additionalProperties": false,
+            "required": ["method", "decision_id"],
+            "properties": {
+              "method": { "enum": ["deterministic_agreement", "llm_selected", "human_confirmed"] },
+              "decision_id": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "accepted_reading_order": {
+      "type": "array", "items": { "type": "string" },
+      "description": "The source-ordering decision (FR-061d). Preserved unchanged downstream (FR-015/SC-023)."
+    },
+    "carried_structural_hints": {
+      "type": "array",
+      "description": "Unapplied (FR-061c). Applied — or not — only by stage 3, which records the use.",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["kind", "source_technique", "segment_id"],
+        "properties": {
+          "kind": { "enum": ["heading", "subheading", "list_item", "list_start", "list_end",
+            "table", "table_row", "table_cell", "caption", "other"] },
+          "level": { "type": ["integer", "null"] },
+          "source_technique": { "type": "string", "minLength": 1 },
+          "segment_id": { "type": "string", "minLength": 1 },
+          "payload": { "type": "object" }
+        }
+      }
+    },
+    "page_classes": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["page", "class"],
+        "properties": {
+          "page": { "type": "integer", "minimum": 1 },
+          "region_bbox": { "oneOf": [ { "type": "null" }, { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 } ] },
+          "class": { "enum": ["native_text_sufficient", "ocr_required", "hybrid_native_and_ocr"] }
+        }
+      }
+    }
+  }
+}

@@ -1,18 +1,20 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://solari.local/schemas/validation-report-1.0.json",
+  "$id": "https://solari.local/schemas/validation-report-2.0.json",
   "title": "ValidationReport",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "record_type", "schema_version", "generated_at", "tool_version",
+    "record_type", "schema_version", "run_id", "tool_version",
     "source_pdf", "source_sha256", "page_selection",
-    "markdown_file", "markdown_sha256", "llm", "checks_run", "issues", "summary"
+    "markdown_file", "markdown_sha256", "llm", "checks_run", "compared_against",
+    "issues", "summary"
   ],
   "properties": {
     "record_type": { "const": "validation_report" },
-    "schema_version": { "const": "1.0" },
-    "generated_at": { "type": "string", "format": "date-time" },
+    "schema_version": { "const": "2.0" },
+    "run_id": { "type": "string", "pattern": "^[a-f0-9]{16}$",
+      "description": "Content-derived digest; no wall-clock time or randomness (FR-053a). Folds in llm model + gross-divergence threshold + OCR settings." },
     "tool_version": { "type": "string", "minLength": 1 },
     "source_pdf": { "type": "string", "minLength": 1 },
     "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
@@ -23,12 +25,28 @@
     "llm": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["required", "available", "base_url"],
+      "required": ["required", "available", "base_url", "decode", "attempts", "reproducibility"],
       "properties": {
         "required": { "const": true },
         "available": { "type": "boolean" },
         "base_url": { "type": "string", "minLength": 1 },
-        "model": { "type": ["string", "null"] }
+        "model": { "type": ["string", "null"] },
+        "decode": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["temperature", "seed"],
+          "description": "Deterministic-decoding params actually sent (research §8).",
+          "properties": {
+            "temperature": { "const": 0 },
+            "seed": { "type": ["integer", "null"] }
+          }
+        },
+        "attempts": { "type": "integer", "minimum": 0,
+          "description": "LLM calls made: 1 on first-try success, up to 1 + SOLARI_LLM_RETRIES; 0 when semantic was skipped (gross divergence)." },
+        "reproducibility": {
+          "enum": ["deterministic", "best_effort"],
+          "description": "FR-053b. 'deterministic': backend honours temperature:0 + seed, so the semantic section is byte-reproducible for identical effective inputs. 'best_effort': backend cannot guarantee deterministic regeneration; the semantic section is reproduced by replaying an already-persisted report for the identical applicability context, not by regeneration; the Markdown rendering states this."
+        }
       }
     },
     "checks_run": {
@@ -40,6 +58,17 @@
         "semantic": { "type": "boolean" }
       }
     },
+    "compared_against": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["original_pdf", "extraction_evidence", "reconciliation_provenance"],
+      "description": "FR-065: validation compares the semantic doc against the PDF AND the independent extraction candidates AND the reconciliation log.",
+      "properties": {
+        "original_pdf": { "const": true },
+        "extraction_evidence": { "type": "boolean" },
+        "reconciliation_provenance": { "type": "boolean" }
+      }
+    },
     "issues": {
       "type": "array",
       "items": {
@@ -47,7 +76,7 @@
         "additionalProperties": false,
         "required": [
           "id", "severity", "source_page", "markdown_line", "markdown_column",
-          "issue_type", "description", "check_origin"
+          "issue_type", "description", "defect_class", "check_origin"
         ],
         "properties": {
           "id": { "type": "string", "minLength": 1 },
@@ -58,10 +87,17 @@
           "issue_type": {
             "enum": ["missing_content", "extra_content", "numeric_mismatch",
               "structure_mismatch", "heading_level", "table_shape", "duplicated_header",
-              "ocr_low_confidence", "reading_order", "gross_divergence", "other"]
+              "reading_order", "unprovenanced_content", "ocr_low_confidence",
+              "gross_divergence", "other"]
           },
           "description": { "type": "string", "minLength": 1 },
+          "defect_class": {
+            "enum": ["extraction_error", "reconciliation_error", "disallowed_transformation"],
+            "description": "FR-034a: which pipeline stage introduced the fault."
+          },
           "check_origin": { "enum": ["deterministic", "semantic"] },
+          "reconciliation_ref": { "type": "string",
+            "description": "decision_id in the reconciliation log; set on reconciliation_error so fix can route it (FR-045a)." },
           "source_location": { "type": "string" },
           "expected": { "type": "string" },
           "found": { "type": "string" },
@@ -83,12 +119,18 @@
     "summary": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["error", "warning", "info", "gross_divergence"],
+      "required": ["error", "warning", "info", "gross_divergence",
+        "source_text_match_rate", "gross_divergence_threshold"],
       "properties": {
         "error": { "type": "integer", "minimum": 0 },
         "warning": { "type": "integer", "minimum": 0 },
         "info": { "type": "integer", "minimum": 0 },
-        "gross_divergence": { "type": "boolean" }
+        "gross_divergence": { "type": "boolean",
+          "description": "true ⇔ source_text_match_rate < gross_divergence_threshold (FR-036a)." },
+        "source_text_match_rate": { "type": "number", "minimum": 0, "maximum": 1,
+          "description": "Selected-page source tokens found in the Markdown ÷ total (research §15)." },
+        "gross_divergence_threshold": { "type": "number", "minimum": 0, "maximum": 1,
+          "description": "Effective per-run threshold; default 0.5." }
       }
     }
   }

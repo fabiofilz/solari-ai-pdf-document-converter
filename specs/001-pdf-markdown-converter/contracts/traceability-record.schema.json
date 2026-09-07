@@ -1,25 +1,25 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://solari.local/schemas/traceability-record-1.0.json",
+  "$id": "https://solari.local/schemas/traceability-record-2.0.json",
   "title": "TraceabilityRecord",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "record_type", "schema_version", "generated_at", "tool_version",
+    "record_type", "schema_version", "run_id", "tool_version",
     "source_pdf", "source_sha256", "page_selection",
-    "run_id", "operation", "physical_page_ranges", "artifacts",
-    "llm_used", "network_egress"
+    "operation", "physical_page_ranges", "artifacts",
+    "llm_used", "network_egress", "resolutions_applied"
   ],
   "properties": {
     "record_type": { "const": "traceability_record" },
-    "schema_version": { "const": "1.0" },
-    "generated_at": { "type": "string", "format": "date-time" },
+    "schema_version": { "const": "2.0" },
+    "run_id": { "type": "string", "pattern": "^[a-f0-9]{16}$",
+      "description": "Content-derived digest; no wall-clock time or randomness (FR-053a). A re-run on identical inputs re-emits this record byte-for-byte (SC-009)." },
     "tool_version": { "type": "string", "minLength": 1 },
     "source_pdf": { "type": "string", "minLength": 1 },
     "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "page_selection": { "type": "string", "minLength": 1 },
-    "run_id": { "type": "string", "minLength": 1 },
-    "operation": { "enum": ["convert", "extract", "validate", "fix", "export"] },
+    "operation": { "const": "convert" },
     "physical_page_ranges": {
       "type": "array",
       "description": "Empty ⇒ whole document.",
@@ -33,13 +33,34 @@
     "artifacts": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["extraction_candidates", "canonical_extracted_document",
+        "reconciliation_log", "original_markdown", "removal_log", "validation_report"],
       "properties": {
+        "extraction_candidates": {
+          "type": "array", "minItems": 2,
+          "items": { "$ref": "#/$defs/artifactRef" },
+          "description": "One per independent path that ran (FR-060)."
+        },
+        "canonical_extracted_document": { "$ref": "#/$defs/artifactRef" },
+        "reconciliation_log": { "$ref": "#/$defs/artifactRef" },
         "original_markdown": { "$ref": "#/$defs/artifactRef" },
         "removal_log": { "$ref": "#/$defs/artifactRef" },
         "validation_report": { "$ref": "#/$defs/artifactRef" },
-        "corrected_markdown": { "$ref": "#/$defs/artifactRef" },
-        "correction_log": { "$ref": "#/$defs/artifactRef" },
+        "human_review_queue": { "$ref": "#/$defs/artifactRef" },
         "docx": { "$ref": "#/$defs/artifactRef" }
+      }
+    },
+    "resolutions_applied": {
+      "type": "array",
+      "description": "human_confirmed resolutions replayed this run (FR-071); part of run_id.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["applicability_key", "review_item_id"],
+        "properties": {
+          "applicability_key": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "review_item_id": { "type": "string", "minLength": 1 }
+        }
       }
     },
     "llm_used": {
@@ -48,14 +69,29 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["base_url", "model", "operations"],
+          "required": ["base_url", "model", "operations", "decode", "reproducibility"],
           "properties": {
             "base_url": { "type": "string", "minLength": 1 },
             "model": { "type": "string", "minLength": 1 },
             "operations": {
               "type": "array",
-              "items": { "enum": ["validate", "fix"] },
-              "minItems": 1
+              "items": { "enum": ["reconcile", "validate"] },
+              "minItems": 1,
+              "maxItems": 2,
+              "uniqueItems": true
+            },
+            "decode": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["temperature", "seed"],
+              "properties": {
+                "temperature": { "const": 0 },
+                "seed": { "type": ["integer", "null"] }
+              }
+            },
+            "reproducibility": {
+              "enum": ["deterministic", "best_effort"],
+              "description": "FR-053b: whether the local LLM backend can guarantee deterministic regeneration of LLM-assisted audit content."
             }
           }
         }

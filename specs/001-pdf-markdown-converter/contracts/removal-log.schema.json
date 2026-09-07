@@ -1,17 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://solari.local/schemas/removal-log-1.0.json",
+  "$id": "https://solari.local/schemas/removal-log-2.0.json",
   "title": "RemovalLog",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "record_type", "schema_version", "generated_at", "tool_version",
+    "record_type", "schema_version", "run_id", "tool_version",
     "source_pdf", "source_sha256", "page_selection", "entries"
   ],
   "properties": {
     "record_type": { "const": "removal_log" },
-    "schema_version": { "const": "1.0" },
-    "generated_at": { "type": "string", "format": "date-time" },
+    "schema_version": { "const": "2.0" },
+    "run_id": { "type": "string", "pattern": "^[a-f0-9]{16}$",
+      "description": "Content-derived digest; no wall-clock time or randomness (FR-053a)." },
     "tool_version": { "type": "string", "minLength": 1 },
     "source_pdf": { "type": "string", "minLength": 1 },
     "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://solari.local/schemas/human-review-resolution-2.0.json",
+  "title": "HumanReviewResolution",
+  "description": "One line of the append-only resolution store (resolutions.jsonl). FR-057b / FR-070 / FR-071.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_type", "schema_version", "run_id", "tool_version",
+    "source_pdf", "source_sha256", "page_selection",
+    "applicability_key", "review_item_id", "conflict_type",
+    "physical_page", "region_bboxes", "candidates_presented",
+    "decision_method", "selected"
+  ],
+  "properties": {
+    "record_type": { "const": "human_review_resolution" },
+    "schema_version": { "const": "2.0" },
+    "run_id": { "type": "string", "pattern": "^[a-f0-9]{16}$",
+      "description": "run_id of the run that created this resolution." },
+    "tool_version": { "type": "string", "minLength": 1 },
+    "source_pdf": { "type": "string", "minLength": 1 },
+    "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "page_selection": { "type": "string", "minLength": 1 },
+    "applicability_key": { "type": "string", "pattern": "^[a-f0-9]{64}$",
+      "description": "sha256(source_sha256 ⧺ conflict_type ⧺ canonical(page, region, aligned candidate-value set) ⧺ canonical_json(config_subset)) — research §22. Replay keys on this; the LAST record per key wins." },
+    "review_item_id": { "type": "string", "minLength": 1 },
+    "conflict_type": { "enum": ["literal_content", "reading_order"] },
+    "physical_page": { "type": "integer", "minimum": 1 },
+    "region_bboxes": {
+      "type": "array", "minItems": 1,
+      "items": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 }
+    },
+    "candidates_presented": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["technique"],
+        "properties": {
+          "technique": { "type": "string", "minLength": 1 },
+          "value": { "type": "string" },
+          "order": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "decision_method": { "const": "human_confirmed" },
+    "selected": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "description": "literal_content resolution",
+          "required": ["mode", "value", "manually_verified"],
+          "properties": {
+            "mode": { "enum": ["select", "entered"] },
+            "value": { "type": "string" },
+            "from_technique": { "type": ["string", "null"] },
+            "manually_verified": { "type": "boolean",
+              "description": "true for mode='entered' (FR-068b): the value was verified against the original PDF." }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "description": "reading_order resolution",
+          "required": ["order"],
+          "properties": {
+            "order": { "type": "array", "items": { "type": "string" }, "minItems": 1,
+              "description": "A permutation of exactly the review item's segment_ids (FR-069)." }
+          }
+        }
+      ]
+    },
+    "reviewer_note": { "type": ["string", "null"] }
+  }
+}

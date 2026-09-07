@@ -1,21 +1,22 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://solari.local/schemas/correction-log-1.0.json",
+  "$id": "https://solari.local/schemas/correction-log-2.0.json",
   "title": "CorrectionLog",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "record_type", "schema_version", "generated_at", "tool_version",
+    "record_type", "schema_version", "run_id", "tool_version",
     "source_pdf", "source_sha256", "page_selection",
     "original_markdown_file", "original_markdown_sha256_before",
     "original_markdown_sha256_after", "corrected_markdown_file",
     "input_report_file", "input_report_sha256",
-    "corrections", "unresolved", "revalidation"
+    "corrections", "routed_to_review", "unresolved", "revalidation"
   ],
   "properties": {
     "record_type": { "const": "correction_log" },
-    "schema_version": { "const": "1.0" },
-    "generated_at": { "type": "string", "format": "date-time" },
+    "schema_version": { "const": "2.0" },
+    "run_id": { "type": "string", "pattern": "^[a-f0-9]{16}$",
+      "description": "Content-derived digest; no wall-clock time or randomness (FR-053a)." },
     "tool_version": { "type": "string", "minLength": 1 },
     "source_pdf": { "type": "string", "minLength": 1 },
     "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
@@ -24,7 +25,8 @@
     "original_markdown_sha256_before": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "original_markdown_sha256_after": { "type": "string", "pattern": "^[a-f0-9]{64}$",
       "description": "MUST equal *_before — the original is never modified (FR-041, SC-007)." },
-    "corrected_markdown_file": { "type": "string", "minLength": 1 },
+    "corrected_markdown_file": { "type": ["string", "null"], "minLength": 1,
+      "description": "null when every flagged issue was routed to human review and none corrected (FR-041)." },
     "input_report_file": { "type": "string", "minLength": 1 },
     "input_report_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "corrections": {
@@ -58,6 +60,20 @@
         }
       }
     },
+    "routed_to_review": {
+      "type": "array",
+      "description": "reconciliation_error issues routed to the human-review layer, not patched (FR-045a/FR-073).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["issue_id", "reconciliation_ref", "review_item_id"],
+        "properties": {
+          "issue_id": { "type": "string", "minLength": 1 },
+          "reconciliation_ref": { "type": "string", "minLength": 1 },
+          "review_item_id": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
     "unresolved": {
       "type": "array",
       "items": {
@@ -72,13 +88,19 @@
       }
     },
     "revalidation": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["report_path", "report_sha256"],
-      "properties": {
-        "report_path": { "type": "string", "minLength": 1 },
-        "report_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
-      }
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["report_path", "report_sha256"],
+          "properties": {
+            "report_path": { "type": "string", "minLength": 1 },
+            "report_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+          }
+        }
+      ],
+      "description": "null when no corrected Markdown was produced (nothing to re-validate)."
     }
   }
 }

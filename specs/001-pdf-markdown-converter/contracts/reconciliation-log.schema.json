@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://solari.local/schemas/reconciliation-log-2.0.json",
+  "title": "ReconciliationLog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_type", "schema_version", "run_id", "tool_version",
+    "source_pdf", "source_sha256", "page_selection",
+    "alignment_summary", "decisions", "unresolved", "summary"
+  ],
+  "$defs": {
+    "envelope": {},
+    "region": {
+      "type": "object", "additionalProperties": false,
+      "required": ["page"],
+      "properties": {
+        "page": { "type": "integer", "minimum": 1 },
+        "bbox": { "oneOf": [ { "type": "null" }, { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 } ] },
+        "region_bboxes": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 } }
+      }
+    }
+  },
+  "properties": {
+    "record_type": { "const": "reconciliation_log" },
+    "schema_version": { "const": "2.0" },
+    "run_id": { "type": "string", "pattern": "^[a-f0-9]{16}$" },
+    "tool_version": { "type": "string", "minLength": 1 },
+    "source_pdf": { "type": "string", "minLength": 1 },
+    "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "page_selection": { "type": "string", "minLength": 1 },
+    "alignment_summary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["groups", "single_candidate_groups", "iou_threshold", "jaccard_threshold"],
+      "properties": {
+        "groups": { "type": "integer", "minimum": 0 },
+        "single_candidate_groups": { "type": "integer", "minimum": 0 },
+        "iou_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "jaccard_threshold": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["decision_id", "conflict_type", "scope", "candidates", "method", "selected"],
+        "properties": {
+          "decision_id": { "type": "string", "minLength": 1 },
+          "conflict_type": { "enum": ["literal_content", "reading_order"] },
+          "scope": { "$ref": "#/$defs/region" },
+          "candidates": {
+            "type": "array", "minItems": 1,
+            "description": "literal: [{technique,value}]; reading_order: [{technique,order:[segment_id]}] (+ optional {technique:'geometry',...})",
+            "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["technique"],
+              "properties": {
+                "technique": { "type": "string", "minLength": 1 },
+                "value": { "type": "string" },
+                "order": { "type": "array", "items": { "type": "string" } },
+                "ocr_confidence": { "type": ["number", "null"] }
+              }
+            }
+          },
+          "method": { "enum": ["deterministic_agreement", "llm_selected", "human_confirmed"] },
+          "selected": {
+            "type": "object", "additionalProperties": false,
+            "properties": {
+              "value": { "type": "string" },
+              "order": { "type": "array", "items": { "type": "string" } },
+              "from": { "type": "string", "description": "technique | 'geometry' | 'human'" }
+            }
+          },
+          "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+          "llm_flip_check": {
+            "oneOf": [ { "type": "null" }, {
+              "type": "object", "additionalProperties": false,
+              "required": ["calls", "agreed"],
+              "properties": { "calls": { "const": 2 }, "agreed": { "type": "boolean" } }
+            } ]
+          },
+          "resolution_ref": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+          "replayed": { "type": ["boolean", "null"] }
+        }
+      }
+    },
+    "unresolved": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["decision_id", "conflict_type", "reason", "review_item_id"],
+        "properties": {
+          "decision_id": { "type": "string", "minLength": 1 },
+          "conflict_type": { "enum": ["literal_content", "reading_order"] },
+          "reason": { "enum": ["below_threshold", "guard_rejected", "llm_flip", "no_llm"] },
+          "review_item_id": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "summary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["literal_deterministic", "literal_llm", "literal_human",
+        "order_deterministic", "order_llm", "order_human", "unresolved"],
+      "properties": {
+        "literal_deterministic": { "type": "integer", "minimum": 0 },
+        "literal_llm": { "type": "integer", "minimum": 0 },
+        "literal_human": { "type": "integer", "minimum": 0 },
+        "order_deterministic": { "type": "integer", "minimum": 0 },
+        "order_llm": { "type": "integer", "minimum": 0 },
+        "order_human": { "type": "integer", "minimum": 0 },
+        "unresolved": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://solari.local/schemas/extraction-candidate-2.0.json",
+  "title": "ExtractionCandidate",
+  "description": "One independent extraction path's output (FR-060). Persisted intermediate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_type", "schema_version", "run_id", "tool_version",
+    "source_pdf", "source_sha256", "page_selection",
+    "technique", "status", "segments", "reading_order", "pages_covered"
+  ],
+  "$defs": {
+    "sourceRef": {
+      "type": "object", "additionalProperties": false,
+      "required": ["physical_page", "origin_kind", "extraction_technique", "ocr_languages"],
+      "properties": {
+        "physical_page": { "type": "integer", "minimum": 1 },
+        "bbox": { "oneOf": [ { "type": "null" }, { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 } ] },
+        "origin_kind": { "enum": ["native_text", "ocr"] },
+        "extraction_technique": { "type": "string", "minLength": 1 },
+        "ocr_languages": { "type": "array", "items": { "type": "string" } },
+        "ocr_confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 100 }
+      }
+    },
+    "structuralHint": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "source_technique"],
+      "properties": {
+        "kind": { "enum": ["heading", "subheading", "list_item", "list_start", "list_end",
+          "table", "table_row", "table_cell", "caption", "other"] },
+        "level": { "type": ["integer", "null"], "minimum": 1 },
+        "source_technique": { "type": "string", "minLength": 1 },
+        "payload": { "type": "object" }
+      }
+    }
+  },
+  "properties": {
+    "record_type": { "const": "extraction_candidate" },
+    "schema_version": { "const": "2.0" },
+    "run_id": { "type": "string", "pattern": "^[a-f0-9]{16}$" },
+    "tool_version": { "type": "string", "minLength": 1 },
+    "source_pdf": { "type": "string", "minLength": 1 },
+    "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "page_selection": { "type": "string", "minLength": 1 },
+    "technique": { "type": "string", "pattern": "^(docling|pdfplumber|ocr:[a-z0-9_-]+)$" },
+    "status": { "enum": ["ok", "partial", "failed"] },
+    "status_detail": { "type": ["string", "null"] },
+    "segments": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["segment_id", "text", "source", "reading_order_index", "structural_hints"],
+        "properties": {
+          "segment_id": { "type": "string", "minLength": 1 },
+          "text": { "type": "string" },
+          "source": { "$ref": "#/$defs/sourceRef" },
+          "reading_order_index": { "type": "integer", "minimum": 0 },
+          "structural_hints": { "type": "array", "items": { "$ref": "#/$defs/structuralHint" } }
+        }
+      }
+    },
+    "reading_order": {
+      "type": "object", "additionalProperties": false,
+      "required": ["technique", "order"],
+      "properties": {
+        "technique": { "type": "string", "minLength": 1 },
+        "order": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "pages_covered": { "type": "array", "items": { "type": "integer", "minimum": 1 } },
+    "page_ocr": {
+      "type": "array",
+      "description": "OCR candidate only.",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["physical_page", "ran_ocr", "languages", "language_source",
+          "mean_confidence", "confidence_threshold", "low_confidence_regions"],
+        "properties": {
+          "physical_page": { "type": "integer", "minimum": 1 },
+          "region_bbox": { "oneOf": [ { "type": "null" }, { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 } ] },
+          "ran_ocr": { "type": "boolean" },
+          "languages": { "type": "array", "items": { "type": "string" } },
+          "language_source": { "enum": ["auto", "override"] },
+          "mean_confidence": { "type": "number", "minimum": 0, "maximum": 100 },
+          "confidence_threshold": { "type": "number", "minimum": 0, "maximum": 100 },
+          "low_confidence_regions": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}
