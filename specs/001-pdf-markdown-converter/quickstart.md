@@ -11,7 +11,7 @@
 | Python 3.12+ (3.13 recommended) | `python3 --version` | everything |
 | `uv` | `uv --version` | install / run |
 | **Docling models** (one-time download from the documented source) | `python -c "import docling"` + first run populates the cache | extraction path A |
-| **OCR engine** — `rapidocr-onnxruntime` (bundled models) **or** Tesseract 5 + language data | `--ocr-engine` + a smoke run | OCR paths / hybrid pages. **Default engine is set after the OCR benchmark (research §4)** |
+| **OCR engine** — **Tesseract 5** + language traineddata (`por eng spa fra ita deu`), and/or **RapidOCR** with the setup-time Latin model (below) | `--ocr-engine` + `benchmarks/ocr/models/fetch_latin_model.py` + a smoke run | OCR paths / hybrid pages. **Default engine is `tesseract`** (OCR Benchmark Gate, research §4 / `benchmarks/ocr/RESULTS.md`) |
 | A local LLM exposing an OpenAI-compatible API (reference: Ollama with a `seed`-honouring model) | `curl -s http://localhost:11434/v1/models` | `validate`, `fix`; optional for `extract`/`convert` reconciliation |
 
 The Docling models, OCR models/traineddata, and the LLM are the user's responsibility. Downloads
@@ -23,8 +23,34 @@ and `export` never require the LLM; without it, `extract` produces more human-re
 ```bash
 uv sync                          # install exact-pinned deps from uv.lock
 uv run solari-convert --help     # extract | validate | fix | export | convert | review
-uv run python -m benchmarks.ocr.run --smoke   # confirm both OCR engines load (see OCR benchmark)
+
+# RapidOCR v1 Latin recognition model + dictionary — setup-time acquisition only.
+# Downloads two files from the official RapidAI/RapidOCR ModelScope repo into
+# benchmarks/ocr/models/ and verifies them against the pinned SHA256SUMS.
+uv run python benchmarks/ocr/models/fetch_latin_model.py
+
+uv run python -m benchmarks.ocr.run --smoke   # confirm both OCR engines load
 ```
+
+### OCR engine bootstrap (clean clone)
+
+| Engine | What a clean clone needs | If missing |
+|---|---|---|
+| **Tesseract 5** (default) | the `tesseract` binary + `por eng spa fra ita deu` traineddata installed on the system | `extract`/benchmark still run with `--ocr-engine tesseract`; a missing *required* traineddata raises `OcrUnavailable` (exit 8) |
+| **RapidOCR** | run `benchmarks/ocr/models/fetch_latin_model.py` once — it fetches `latin_PP-OCRv3_rec_infer.onnx` + `latin_dict.txt` (SHA256-pinned) into `benchmarks/ocr/models/` | `RapidOcrEngine.is_available()` is `False` and any use raises `OcrUnavailable` — it **never** falls back to `rapidocr-onnxruntime`'s bundled Chinese recognition model |
+
+- The model/dictionary binaries are **intentionally not committed** to Git
+  (`benchmarks/ocr/models/.gitignore`); `README.md`, `SHA256SUMS`, and
+  `fetch_latin_model.py` in that directory are the tracked reproducibility record.
+- Acquisition verifies the pinned SHA256 values; a mismatch is a hard error.
+- The document-processing runtime **never** downloads a model — `RapidOcrEngine`
+  re-verifies the two digests before every RapidOCR init and fails closed on any
+  mismatch.
+- **The full two-engine OCR Benchmark Gate** (`uv run python -m benchmarks.ocr.run`,
+  no `--smoke`) requires **both** Tesseract (with traineddata) **and** the fetched
+  RapidOCR Latin model. With only one engine available it refuses `--smoke`
+  (`FAIL: expected 2 engines`) rather than reporting a valid gate; the RapidOCR
+  guard tests `SKIP` with a stated reason.
 
 ## Scenario 1 — `extract`, paths agree (US1)
 

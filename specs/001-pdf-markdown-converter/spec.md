@@ -12,6 +12,7 @@
 
 ### Session 2026-09-07
 
+- Q: (Clarifies the v1 language scope) Which languages does v1 support, and what is out of scope? → A: v1 targets **Latin-script Western-language** documents. **Primary validated languages: Portuguese, English, Spanish** — these are the OCR-benchmark and release-acceptance-corpus dimensions. **French, Italian, German** must work through the same Latin-script OCR / pipeline path (character-coverage compatible; no Portuguese-specific hard-coding) but are **not** primary scored dimensions. **CJK and other non-Latin writing systems (Chinese, Japanese, Korean, …) are explicitly out of scope for v1.** OCR language identifiers stay generic BCP-47 / ISO-style strings (no enum in the schemas or data model), so a future writing system is an additive change — a new OCR model plus corpus — with no data-model or contract redesign. This **narrows** the earlier "language-agnostic … at least Latin-script" assumption; it changes no functional requirement.
 - Q: How should `validate` decide that a Markdown and its source PDF have grossly diverged (e.g. the wrong Markdown was supplied)? → A: Measure the share of the selected pages' extractable source text that can be matched in the Markdown; when it falls below a configurable gross-divergence threshold (default 50%), set a `gross_divergence` indicator, lead the report with one summary issue stating the observed match rate, and suppress exhaustive line-level issues while still listing structural issues.
 - Q: What should `validate`/`fix` do if the local LLM is reachable at probe time but then fails mid-run (timeout, HTTP error, unparseable response)? → A: Retry a bounded number of times (default 2); if it still fails, abort with the same clear message and exit status as an unavailable LLM, leaving no report or corrected file presented as complete.
 - Q: Must the generated audit records be fully reproducible so an unchanged re-run is a byte-identical no-op rather than a collision error? → A: Yes. Record bodies carry no wall-clock timestamp or random run id; the deterministic run identifier is derived from the source hash, the normalized page selection, the tool version, and all output-affecting configuration, so every generated artifact is byte-identical across identical-input runs and a repeat run is a satisfied no-op.
@@ -1300,8 +1301,17 @@ unresolved source reading order — those go through the human-review workflow
 - One source PDF is processed per invocation; batch processing of multiple PDFs is
   out of scope for the first version.
 - Physical PDF pages are indexed from 1.
-- The tool is language-agnostic for text content and must handle at least
-  Latin-script languages, including Portuguese.
+- **Language scope (v1).** The tool targets **Latin-script Western-language**
+  documents. The **primary validated languages are Portuguese, English, and
+  Spanish** (the benchmark and acceptance-corpus dimensions). **French, Italian,
+  and German** are architecturally supported through the same Latin-script
+  OCR / pipeline path — character-coverage compatible, no Portuguese-specific
+  hard-coding — but are not primary scored dimensions. **CJK and other non-Latin
+  writing systems (Chinese, Japanese, Korean, …) are explicitly out of scope for
+  v1.** Language identifiers remain generic / open BCP-47 / ISO-style strings (no
+  enum in the schemas or data model), so an additional writing system is an
+  additive change — a new OCR model plus corpus — with no schema or data-model
+  redesign.
 - A "local LLM" means a language model that runs entirely on the user's machine;
   its selection and setup are the user's responsibility. `validate` / `fix` depend
   on it (except a `validate` run that short-circuits on gross divergence). `extract`

@@ -1,0 +1,21 @@
+# Canonical OCR benchmark corpus fixtures — frozen for the T001–T013 checkpoint.
+# Generated 2026-09-08 on macOS-26.6.2-arm64 / Pillow 12.3.0 / Python 3.13.14,
+# font: /System/Library/Fonts/Supplemental/Arial.ttf (build_corpus.py _TTF_CANDIDATES[0];
+#       Linux would fall back to DejaVu/Liberation and render different pixels).
+# 'uv run python -m benchmarks.ocr.corpus.build_corpus' regenerates these; rendering
+# varies by OS/font environment, so a regenerated set that changes any digest below
+# MUST be reviewed and the benchmark re-baselined before it replaces the tracked set.
+# Verify:  cd benchmarks/ocr/corpus && shasum -a 256 -c FIXTURES.sha256
+5f026803ec38d557964f08c17214c1a370e7aa8c9b1a475f39b0d0fd98f09994  degraded_scan_01.png
+4856b63faf952d894d0fb2b37c3d27708390fca987cad60d743452342347d53b  en_text_01.png
+bd4c9d413dc88bf323b9cad979909fa7c194703a962ff881fa8f5a37a9807c05  es_diacritics_01.png
+728cb8d8af8f7aaa356350a127cb57a89e3e3e99f8b312716089686212121d43  es_numeric_01.png
+692378f0841f109c50c9b2a71415c899a94e9998bb737fb64031e0eb0021638b  hybrid_native_ocr_01.png
+48e5e8de47ac8682e54e4e7917a3361ed3d1b9b2bcd479e169dca00213b429bb  image_only_01.png
+769f1a64672807e9fb565dfe5d8b80ee65afc12bff39d2f0e7c445eac6184fed  latin_coverage_01.png
+2d3227cce5fd7619d26ae9bd5c0330b863d90b51887f8f66e31942233ac5b626  multicolumn_legal_01.png
+3e7f66bced863543c2560f51614626d583857e3663779567a9c7bd9eedbd4f50  multicolumn_legal_02.png
+a3629c6d876d3fff83d065750df9feae6ef353d7c5ae45aa83f5e842914eea39  numeric_monetary_01.png
+0b566c72aaef3558439819983b313bbf1faff9825bf52a5ef9a777c44e528ed2  pt_diacritics_01.png
+6ba9a2056d82e8b9d58ddefca9f6f4d2e63e1f34069afdc26e3d1a60b2d6d392  simple_table_01.png
+2314b070a4000e14e7ce6eb8acc1c8635605fba295210f94db575a36cbebbddd  small_text_01.png

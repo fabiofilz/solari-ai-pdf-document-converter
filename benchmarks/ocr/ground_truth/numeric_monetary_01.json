@@ -1,0 +1,17 @@
+{
+  "category": "numeric_monetary",
+  "columns": null,
+  "language": "pt",
+  "lines": [
+    "Valor total da transação: R$ 1.234.567,89",
+    "Taxa condominial mensal: R$ 987,50 (novecentos e oitenta e sete reais)",
+    "Multa de 2% sobre R$ 10.000,00 corresponde a R$ 200,00",
+    "Parcelamento: 12x de R$ 999,99, totalizando R$ 11.999,88",
+    "Índices: 0,5% | 1,25% | 100% | USD 45,000.00 | EUR 3.141,59"
+  ],
+  "name": "numeric_monetary_01",
+  "reading_order": "top-to-bottom",
+  "scored": true,
+  "source": "synthetic (benchmarks/ocr/corpus/build_corpus.py) — exact ground truth",
+  "text": "Valor total da transação: R$ 1.234.567,89\nTaxa condominial mensal: R$ 987,50 (novecentos e oitenta e sete reais)\nMulta de 2% sobre R$ 10.000,00 corresponde a R$ 200,00\nParcelamento: 12x de R$ 999,99, totalizando R$ 11.999,88\nÍndices: 0,5% | 1,25% | 100% | USD 45,000.00 | EUR 3.141,59"
+}

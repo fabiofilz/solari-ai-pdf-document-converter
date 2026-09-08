@@ -1,0 +1,16 @@
+{
+  "category": "degraded_scan",
+  "columns": null,
+  "language": "pt",
+  "lines": [
+    "DECLARAÇÃO DE QUITAÇÃO",
+    "Declaro, para os devidos fins, que o valor de R$ 8.750,00 foi",
+    "integralmente quitado na data de 03 de março de 2026.",
+    "Assinatura do credor: ______________________"
+  ],
+  "name": "degraded_scan_01",
+  "reading_order": "top-to-bottom",
+  "scored": true,
+  "source": "synthetic (benchmarks/ocr/corpus/build_corpus.py) — exact ground truth",
+  "text": "DECLARAÇÃO DE QUITAÇÃO\nDeclaro, para os devidos fins, que o valor de R$ 8.750,00 foi\nintegralmente quitado na data de 03 de março de 2026.\nAssinatura do credor: ______________________"
+}

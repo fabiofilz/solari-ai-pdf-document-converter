@@ -1,0 +1,61 @@
+{
+  "category": "multicolumn_legal",
+  "columns": [
+    [
+      "CAPÍTULO III",
+      "DA ADMINISTRAÇÃO",
+      "",
+      "Art. 4º O condomínio será",
+      "administrado por um síndico,",
+      "eleito em assembleia geral",
+      "para mandato de 2 anos,",
+      "permitida a reeleição.",
+      "",
+      "Art. 5º Compete ao síndico",
+      "representar o condomínio",
+      "ativa e passivamente."
+    ],
+    [
+      "CAPÍTULO IV",
+      "DAS PENALIDADES",
+      "",
+      "Art. 6º O condômino que",
+      "não cumprir seus deveres",
+      "pagará multa equivalente a",
+      "R$ 500,00 por infração.",
+      "",
+      "Art. 7º Em caso de",
+      "reincidência, a multa será",
+      "elevada ao quíntuplo, sem",
+      "prejuízo das perdas e danos."
+    ]
+  ],
+  "language": "pt",
+  "lines": [
+    "CAPÍTULO III",
+    "DA ADMINISTRAÇÃO",
+    "Art. 4º O condomínio será",
+    "administrado por um síndico,",
+    "eleito em assembleia geral",
+    "para mandato de 2 anos,",
+    "permitida a reeleição.",
+    "Art. 5º Compete ao síndico",
+    "representar o condomínio",
+    "ativa e passivamente.",
+    "CAPÍTULO IV",
+    "DAS PENALIDADES",
+    "Art. 6º O condômino que",
+    "não cumprir seus deveres",
+    "pagará multa equivalente a",
+    "R$ 500,00 por infração.",
+    "Art. 7º Em caso de",
+    "reincidência, a multa será",
+    "elevada ao quíntuplo, sem",
+    "prejuízo das perdas e danos."
+  ],
+  "name": "multicolumn_legal_02",
+  "reading_order": "left column top-to-bottom, then right column top-to-bottom",
+  "scored": true,
+  "source": "synthetic (benchmarks/ocr/corpus/build_corpus.py) — exact ground truth",
+  "text": "CAPÍTULO III\nDA ADMINISTRAÇÃO\n\nArt. 4º O condomínio será\nadministrado por um síndico,\neleito em assembleia geral\npara mandato de 2 anos,\npermitida a reeleição.\n\nArt. 5º Compete ao síndico\nrepresentar o condomínio\nativa e passivamente.\nCAPÍTULO IV\nDAS PENALIDADES\n\nArt. 6º O condômino que\nnão cumprir seus deveres\npagará multa equivalente a\nR$ 500,00 por infração.\n\nArt. 7º Em caso de\nreincidência, a multa será\nelevada ao quíntuplo, sem\nprejuízo das perdas e danos."
+}

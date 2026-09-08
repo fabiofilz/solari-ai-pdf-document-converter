@@ -1,0 +1,17 @@
+{
+  "category": "es_diacritics",
+  "columns": null,
+  "language": "es",
+  "lines": [
+    "COMUNICACIÓN OFICIAL EN ESPAÑOL",
+    "El señor pregunta: ¿Cómo está su corazón después de un año difícil?",
+    "¡Hola! Un niño pequeño y un pingüino jugaban juntos en el jardín.",
+    "La niña dijo: «Añoran la canción tradicional española del pueblo».",
+    "Vocales acentuadas: á é í ó ú; diéresis: ü; letra eñe: ñ."
+  ],
+  "name": "es_diacritics_01",
+  "reading_order": "top-to-bottom",
+  "scored": true,
+  "source": "synthetic (benchmarks/ocr/corpus/build_corpus.py) — exact ground truth",
+  "text": "COMUNICACIÓN OFICIAL EN ESPAÑOL\nEl señor pregunta: ¿Cómo está su corazón después de un año difícil?\n¡Hola! Un niño pequeño y un pingüino jugaban juntos en el jardín.\nLa niña dijo: «Añoran la canción tradicional española del pueblo».\nVocales acentuadas: á é í ó ú; diéresis: ü; letra eñe: ñ."
+}

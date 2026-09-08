@@ -1,0 +1,16 @@
+{
+  "category": "hybrid_native_ocr",
+  "columns": null,
+  "language": "pt",
+  "lines": [
+    "REGISTRO CIVIL DAS PESSOAS NATURAIS",
+    "Selo Digital de Fiscalização nº 4471-A-0092",
+    "Emolumentos: R$ 27,50    Taxa de Fiscalização: R$ 5,10",
+    "Confira a autenticidade em: selo.tjsp.jus.br"
+  ],
+  "name": "hybrid_native_ocr_01",
+  "reading_order": "top-to-bottom",
+  "scored": true,
+  "source": "synthetic (benchmarks/ocr/corpus/build_corpus.py) — exact ground truth",
+  "text": "REGISTRO CIVIL DAS PESSOAS NATURAIS\nSelo Digital de Fiscalização nº 4471-A-0092\nEmolumentos: R$ 27,50    Taxa de Fiscalização: R$ 5,10\nConfira a autenticidade em: selo.tjsp.jus.br"
+}

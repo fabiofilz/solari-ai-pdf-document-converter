@@ -1,0 +1,17 @@
+{
+  "category": "simple_table",
+  "columns": null,
+  "language": "pt",
+  "lines": [
+    "Item            Qtd     Unit (R$)      Total (R$)",
+    "Bloco A          1       12.500,00     12.500,00",
+    "Bloco B          3        4.750,00     14.250,00",
+    "Garagem         12          350,00      4.200,00",
+    "TOTAL GERAL                            30.950,00"
+  ],
+  "name": "simple_table_01",
+  "reading_order": "top-to-bottom",
+  "scored": true,
+  "source": "synthetic (benchmarks/ocr/corpus/build_corpus.py) — exact ground truth",
+  "text": "Item            Qtd     Unit (R$)      Total (R$)\nBloco A          1       12.500,00     12.500,00\nBloco B          3        4.750,00     14.250,00\nGaragem         12          350,00      4.200,00\nTOTAL GERAL                            30.950,00"
+}

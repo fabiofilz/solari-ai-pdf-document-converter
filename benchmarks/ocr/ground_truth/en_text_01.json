@@ -1,0 +1,18 @@
+{
+  "category": "en_text",
+  "columns": null,
+  "language": "en",
+  "lines": [
+    "THE QUARTERLY REPORT",
+    "The Board’s decision, reached after review, was unanimous and final.",
+    "“We project revenue of $1,234.56 this year,” the chair noted.",
+    "Cross-border fees rose to £1,000 — a 4.5% year-over-year increase.",
+    "Well-founded, cost-effective, time-limited measures were approved.",
+    "The efficient workflow was finalized before the office closed."
+  ],
+  "name": "en_text_01",
+  "reading_order": "top-to-bottom",
+  "scored": true,
+  "source": "synthetic (benchmarks/ocr/corpus/build_corpus.py) — exact ground truth",
+  "text": "THE QUARTERLY REPORT\nThe Board’s decision, reached after review, was unanimous and final.\n“We project revenue of $1,234.56 this year,” the chair noted.\nCross-border fees rose to £1,000 — a 4.5% year-over-year increase.\nWell-founded, cost-effective, time-limited measures were approved.\nThe efficient workflow was finalized before the office closed."
+}

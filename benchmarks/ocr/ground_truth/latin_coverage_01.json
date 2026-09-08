@@ -1,0 +1,16 @@
+{
+  "category": "latin_coverage",
+  "columns": null,
+  "language": "mul",
+  "lines": [
+    "COBERTURA DE CARACTERES LATINOS (FR / IT / DE)",
+    "Français : à â ç é è ê ë î ï ô û ù ü œ — déjà, forêt, garçon, cœur.",
+    "Italiano : à è é ì î ò ó ù — città, perché, così, virtù, sarà.",
+    "Deutsch : ä ö ü ß Ä Ö Ü — Straße, Grüße, Fußgänger, schön."
+  ],
+  "name": "latin_coverage_01",
+  "reading_order": "top-to-bottom",
+  "scored": false,
+  "source": "synthetic (benchmarks/ocr/corpus/build_corpus.py) — exact ground truth",
+  "text": "COBERTURA DE CARACTERES LATINOS (FR / IT / DE)\nFrançais : à â ç é è ê ë î ï ô û ù ü œ — déjà, forêt, garçon, cœur.\nItaliano : à è é ì î ò ó ù — città, perché, così, virtù, sarà.\nDeutsch : ä ö ü ß Ä Ö Ü — Straße, Grüße, Fußgänger, schön."
+}

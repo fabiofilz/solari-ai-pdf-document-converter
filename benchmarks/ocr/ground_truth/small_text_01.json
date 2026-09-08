@@ -1,0 +1,16 @@
+{
+  "category": "small_text",
+  "columns": null,
+  "language": "pt",
+  "lines": [
+    "Parágrafo único. O disposto neste artigo aplica-se, no que couber, às",
+    "unidades autônomas e às áreas de uso comum, observada a fração ideal",
+    "atribuída a cada condômino no instrumento de instituição do condomínio,",
+    "bem como as deliberações regularmente tomadas em assembleia geral."
+  ],
+  "name": "small_text_01",
+  "reading_order": "top-to-bottom",
+  "scored": true,
+  "source": "synthetic (benchmarks/ocr/corpus/build_corpus.py) — exact ground truth",
+  "text": "Parágrafo único. O disposto neste artigo aplica-se, no que couber, às\nunidades autônomas e às áreas de uso comum, observada a fração ideal\natribuída a cada condômino no instrumento de instituição do condomínio,\nbem como as deliberações regularmente tomadas em assembleia geral."
+}

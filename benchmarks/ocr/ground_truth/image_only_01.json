@@ -1,0 +1,17 @@
+{
+  "category": "image_only",
+  "columns": null,
+  "language": "pt",
+  "lines": [
+    "ESCRITURA PÚBLICA DE COMPRA E VENDA",
+    "Aos sete dias do mês de setembro do ano de dois mil e vinte e seis,",
+    "nesta cidade de São Paulo, perante mim, Tabelião, compareceram as",
+    "partes entre si justas e contratadas, a saber: o outorgante vendedor e",
+    "o outorgado comprador, ambos maiores e capazes."
+  ],
+  "name": "image_only_01",
+  "reading_order": "top-to-bottom",
+  "scored": true,
+  "source": "synthetic (benchmarks/ocr/corpus/build_corpus.py) — exact ground truth",
+  "text": "ESCRITURA PÚBLICA DE COMPRA E VENDA\nAos sete dias do mês de setembro do ano de dois mil e vinte e seis,\nnesta cidade de São Paulo, perante mim, Tabelião, compareceram as\npartes entre si justas e contratadas, a saber: o outorgante vendedor e\no outorgado comprador, ambos maiores e capazes."
+}

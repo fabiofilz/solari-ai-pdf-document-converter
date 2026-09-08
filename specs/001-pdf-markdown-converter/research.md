@@ -11,8 +11,8 @@ current spec. Sections 20–23 are new (Docling, reconciliation design, human-re
 workflow, artifact persistence).
 
 **Open items requiring evidence or a later decision:**
-- **§4 — OCR engine** (Tesseract 5 vs RapidOCR/PP-OCR): benchmark-gated, **not run**, no default.
-- **§5 — OCR language detector** (langdetect vs lingua-py vs engine-native): re-open, decide on accuracy.
+- **§4 — OCR engine** (Tesseract 5 vs RapidOCR/PP-OCR): **RESOLVED (corrected benchmark, 2026-09-07)** → **Tesseract 5** is the single global default. The corrected T013 run gives RapidOCR its multilingual **Latin** recognition model and scores PT/EN/ES separately; Tesseract clears the §4.1 per-language acceptance floor for all three, RapidOCR is materially worse for all three. Evidence: `benchmarks/ocr/RESULTS.md`.
+- **§5 — OCR language detector** (langdetect vs lingua-py vs engine-native): **RESOLVED (corrected benchmark, 2026-09-07)** → **lingua** is the default (1.000 across PT/EN/ES), `langdetect` (seed-pinned) the fallback. Re-derived from the PT/EN/ES corpus in the corrected T013 run.
 - **§4a — LLM backend determinism**: strategy defined; the specific local backend's bit-reproducibility is confirmed at implementation time.
 - **§16 — Camelot/tabula for tables**: decide on measured multi-page-table fidelity vs the in-house stitcher.
 
@@ -115,21 +115,64 @@ target document corpus**, via a technical evaluation that at minimum compares:
 Other fully-local OCR engines MAY be added to the comparison where there is credible evidence
 they could materially improve fidelity.
 
-**Evaluation corpus** — MUST include representative difficult cases:
-Portuguese text with accents / diacritics; small text; numeric and monetary values; tables;
-degraded / scanned pages; image-only pages; mixed / hybrid PDF pages where applicable; and
-layouts representative of the project's target PDFs.
+**Language scope (v1, spec Clarifications 2026-09-07).** The benchmark evaluates **Latin-script
+Western languages**. **Primary benchmark languages: Portuguese, English, Spanish** — each is a
+scored dimension with its own corpus pages. **French, Italian, German** are Latin-script
+**compatibility / character-coverage** targets only (one `latin_coverage` page: representative
+`à â ç é è ê ë î ï ô û ù ü œ ß ä ö à è é ì ò ù` and tokens such as `français`, `Straße`, `città`)
+— not scored language dimensions. **CJK and other non-Latin systems are out of scope for v1**;
+the benchmark does not include them.
+
+**Evaluation corpus** — MUST include representative difficult cases across the primary languages:
+accents / diacritics (PT: `ã â ê õ ç`; ES: `ñ ¿ ¡ ü`); small text; numeric and monetary values
+(`R$`, `€`, `%`); tables; degraded / scanned pages; image-only pages; mixed / hybrid PDF pages
+where applicable; and layouts representative of the project's target PDFs. Structural / degraded /
+table fixtures are **not** duplicated in every language — Portuguese carries the deepest category
+matrix; English and Spanish add language-validation pages (`en_text_01`, `es_diacritics_01`,
+`es_numeric_01`).
 
 **Benchmark criteria** — fidelity, not merely "text was returned":
-character / text accuracy; preservation of numeric values; Portuguese diacritics; table / cell
-text accuracy; reading-order behavior where applicable; behavior on degraded scans; false
-insertion and omission of content.
+character / text accuracy; preservation of numeric values; diacritic accuracy **for each primary
+language**; table / cell text accuracy; reading-order behavior where applicable; behavior on
+degraded scans; false insertion and omission of content.
 
-**Selection rule**: the engine with the best demonstrated fidelity for the target corpus becomes
-the default, **unless another documented constraint** (e.g. license incompatibility, a platform
-the project must support, or a genuine local-first violation) materially outweighs the fidelity
-advantage. A secondary OCR engine MAY remain available as a fallback or as an additional
-reconciliation candidate / evidence source.
+**Per-language acceptance floor (v1) — AUTHORITATIVE.** This is the single normative definition;
+`tasks.md` (T011/T012/T013) references it and MUST NOT restate the numbers. These are **OCR
+benchmark engine-selection floors** — they are *not* a replacement for the converter's own
+acceptance criteria (`spec.md` Success Criteria, T124, or the final fidelity-validation
+pipeline). For **each** primary benchmark language (Portuguese, English, Spanish), an OCR engine
+is **acceptable for that language** only if **every applicable** criterion below passes on that
+language's slice:
+
+| # | Criterion | Threshold | Applicability |
+|---|---|---|---|
+| 1 | per-language weighted fidelity | `weighted_total >= 0.80` | always (every primary language) |
+| 2 | character error rate | `CER <= 0.20` | always (every primary language) |
+| 3 | diacritic accuracy | `diacritic_accuracy >= 0.90` | only slices/pages carrying the representative diacritic ground-truth set — **required gate for Portuguese and Spanish**; **not** applied to an English slice with no applicable diacritic ground truth (do not fabricate one) |
+| 4 | numeric-token fidelity | `numeric_token_exact_match >= 0.95` | only slices/pages carrying numeric or monetary ground-truth tokens |
+
+"**Materially worse for a supported primary language**" is defined **operationally and
+absolutely**: the engine **fails one or more applicable per-language acceptance-floor criteria
+(1–4 above) for that primary language**. It is **not** defined relative to the competing engine —
+no absolute score difference vs. the other engine, no percentage difference vs. the other engine;
+an engine does **not** become acceptable merely because the competing engine also performs badly.
+
+**Selection rule (engine-selection procedure):**
+1. Compute **aggregate** weighted fidelity for each engine.
+2. Compute **per-language** metrics for Portuguese / English / Spanish.
+3. Determine **PASS/FAIL** for each engine×language using the **absolute** per-language
+   acceptance floor above (applicable criteria only).
+4. If the **best-aggregate** engine PASSES all applicable floors for PT **and** EN **and** ES,
+   select it as the **single global default**.
+5. Otherwise evaluate the **other** engine.
+6. If the other engine PASSES all three primary-language gates **and** has acceptable aggregate
+   fidelity, select it as the **global default**.
+7. **Only if neither** engine provides acceptable global coverage may a **per-language engine
+   strategy** be considered, and only from measured evidence.
+
+A documented hard constraint (license, platform, local-first) may still override on fidelity
+ties. A secondary OCR engine MAY remain available as a fallback / additional reconciliation
+candidate / evidence source.
 
 **Constraints that carry over unchanged**:
 - OCR is a fully local-first, **independent extraction technique** (path C, FR-060); document
@@ -146,10 +189,22 @@ reconciliation candidate / evidence source.
 - Whatever engine is chosen, its per-word / per-token confidence is **normalized to a 0–100
   scale** for FR-027 (default low-confidence threshold 70) — see §9a.
 
-**Status**: the benchmark has **NOT** been run and **no default engine is chosen**. As of
-2026-09-07 the repository contains no objective OCR benchmark evidence. `plan.md` / `tasks.md`
-must add the benchmark as a task; this section must be updated with the result and the chosen
-default (plus the fallback, if any) before OCR implementation begins.
+**Status**: **RESOLVED — corrected Latin-script benchmark, 2026-09-07.** The first T013 run was
+invalid (RapidOCR benchmarked with the bundled Chinese `ch_PP-OCRv4_rec` model, whose dictionary
+lacks `ã â ê õ ç`). The corrected run (`benchmarks/ocr/run.py`, seed 0, **13 synthetic pages / 12
+scored across PT·EN·ES**, 2026-09-07) configures RapidOCR with the multilingual **Latin**
+recognition model `latin_PP-OCRv3_rec_infer.onnx` (official RapidAI/RapidOCR ModelScope repo;
+sha256 recorded in `benchmarks/ocr/models/README.md`; loaded + executed on Apple Silicon / arm64
+with `onnxruntime==1.29.0`) via explicit `rec_model_path` / `rec_keys_path`.
+
+Result, applying the §4.1 engine-selection procedure: aggregate weighted fidelity — Tesseract
+**0.936**, RapidOCR-Latin **0.700**. Per-language §4.1 acceptance floor — **Tesseract PASSES
+PT, EN and ES**; **RapidOCR-Latin FAILS all three** (PT: weighted 0.678 / CER 0.297 / diacritic
+0.180; EN: weighted 0.797 / CER 0.201 / numeric-token 0.250; ES: diacritic 0.378). The
+best-aggregate engine (Tesseract) clears the floor for all three primary languages → **Tesseract
+is the single global default; one global OCR default is sufficient (no per-language routing).**
+RapidOCR (Latin model) remains an available, explicitly-selectable fallback / reconciliation
+evidence source. Full evidence + step-by-step procedure: `benchmarks/ocr/RESULTS.md`.
 
 **Rejected for reasons still valid under v2.0.0**:
 - *OCRmyPDF*: rewrites the PDF; this feature needs text + confidence extracted into the model,
@@ -168,16 +223,24 @@ sample, then re-run the OCR engine with the detected language(s). Accept an opti
 per-run override (one or more languages) that skips detection. Record the detected or overridden
 language(s) in the OCR provenance for that page/region (FR-027a).
 
-**Rationale**: `langdetect` is offline and covers the Latin-script languages the spec requires
-including Portuguese. Two-pass OCR (detect, then recognize) is a well-known pattern and keeps the
-common case zero-config while allowing an override for known-language documents.
+**Rationale**: an offline detector covering the **primary v1 languages — Portuguese, English,
+Spanish** (spec Clarifications 2026-09-07). Two-pass OCR (detect, then recognize) is a well-known
+pattern and keeps the common case zero-config while allowing an override for known-language
+documents. The **language-detector benchmark MUST distinguish at least Portuguese, English, and
+Spanish** on short OCR'd fragments (the `por` vs `spa` case is the hard one); a corpus dominated
+by one language does not exercise the detector.
 
-**Contingent on §4**: how a language is *passed* to the OCR engine depends on which engine wins
-the §4 benchmark — Tesseract takes `-l por+eng`; PP-OCR / RapidOCR models are script- or
-language-family-scoped and select a model rather than a language string. The lingua-py vs
-langdetect trade-off (lingua-py is more accurate on short text, langdetect is lighter) is also
-re-open under Constitution v2.0.0 and should be revisited if detection accuracy proves to
-materially affect OCR fidelity for the corpus.
+**How a language reaches the OCR engine** (v1 Latin-script scope):
+- **Tesseract** — the detected / overridden language id maps to installed traineddata:
+  `pt→por`, `en→eng`, `es→spa`, `fr→fra`, `it→ita`, `de→deu`; multi-language pages combine with
+  `+` (e.g. `-l por+eng`). Missing required traineddata → `OcrUnavailable`.
+- **RapidOCR** — **one multilingual Latin PP-OCR recognition model for every supported v1
+  language** (no per-language model switching, no Latin/CJK routing). It is supplied via explicit
+  local `rec_model_path` + `rec_keys_path`; the bundled Chinese `ch_PP-OCRv4_rec` model MUST NOT
+  be used for any supported v1 language; absence of the Latin model/dict → `OcrUnavailable`.
+
+The lingua-py vs langdetect trade-off (lingua-py is more accurate on short text) is decided by the
+§4 language-detection sub-metric on the multilingual corpus.
 
 **Determinism**: `langdetect` seeds its RNG from the system clock by default, which would make
 detection — and therefore OCR output and the Markdown — non-reproducible, violating FR-053a /
@@ -195,6 +258,13 @@ FR-027b. `convert` already forwards both.
 language), and whichever of {`langdetect` seed-pinned, `lingua-language-detector`, the OCR
 engine's own language hint} scores best on the corpus becomes the default. Interim implementation:
 `langdetect` (seed-pinned), swappable.
+
+**RESOLVED — corrected sub-metric, 2026-09-07.** Re-derived on the multilingual PT/EN/ES corpus
+(which does exercise Portuguese-vs-Spanish discrimination), detecting on each engine's OCR
+output: **`lingua` 1.000 overall (PT 1.000, EN 1.000, ES 1.000)**; `langdetect` (seed 0) 0.917
+overall (one miss on a short degraded Portuguese page); engine-native 0.000 (OCR reports script,
+not language). **Default language detector = `lingua`**, with seed-pinned `langdetect` as the
+fallback (`lingua` has no RNG, so it needs no seed pinning). Evidence: `benchmarks/ocr/RESULTS.md`.
 
 **Alternatives considered**:
 - *OCR-engine script / orientation detection* (e.g. Tesseract OSD `--psm 0`): detects script and
@@ -835,10 +905,11 @@ the Outstanding items list and the tuning task.
 
 ## Outstanding items for Phase 1 / gated on evidence
 
-- **§4 OCR engine** — benchmark not run; no default. `/speckit-tasks` places the benchmark before
-  any OCR-engine-hardcoding task.
-- **§5 language detector** — langdetect vs lingua-py vs engine-native; decide on the OCR benchmark's
-  language-detection sub-metric.
+- **§4 OCR engine** — **RESOLVED (corrected benchmark T013, 2026-09-07)**: default = **Tesseract 5**
+  (single global default; clears the §4.1 per-language acceptance floor for PT/EN/ES, RapidOCR-Latin
+  fails all three). `benchmarks/ocr/RESULTS.md`.
+- **§5 language detector** — **RESOLVED (corrected benchmark T013, 2026-09-07)**: default = **lingua**
+  (1.000 across PT/EN/ES), seed-pinned `langdetect` fallback.
 - **§4a** — confirm the chosen local LLM backend's behaviour under `seed`; document the reference
   backend in quickstart.
 - **§16 Camelot** — decide after the table-fidelity corpus scoring.

@@ -1,0 +1,17 @@
+{
+  "category": "es_numeric",
+  "columns": null,
+  "language": "es",
+  "lines": [
+    "FACTURA Y LIQUIDACIÓN MENSUAL",
+    "Importe total de la operación: € 1.234,56",
+    "Cuota mensual: € 987,50 (novecientos ochenta y siete euros)",
+    "Recargo del 2% sobre € 10.000,00 equivale a € 200,00",
+    "Índices aplicados: 0,5% | 1,25% | 100% | USD 45,000.00"
+  ],
+  "name": "es_numeric_01",
+  "reading_order": "top-to-bottom",
+  "scored": true,
+  "source": "synthetic (benchmarks/ocr/corpus/build_corpus.py) — exact ground truth",
+  "text": "FACTURA Y LIQUIDACIÓN MENSUAL\nImporte total de la operación: € 1.234,56\nCuota mensual: € 987,50 (novecientos ochenta y siete euros)\nRecargo del 2% sobre € 10.000,00 equivale a € 200,00\nÍndices aplicados: 0,5% | 1,25% | 100% | USD 45,000.00"
+}

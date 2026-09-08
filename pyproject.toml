@@ -1,0 +1,90 @@
+[project]
+name = "solari-converter"
+version = "0.1.0"
+description = "Local-First PDF Document Converter — multi-path extraction -> reconciliation -> semantic transformation -> final validation"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+# Phased dependency installation (T002 + T046, 7-day supply-chain rule).
+# T002 declares and installs ONLY the Phase 1-2 set. Every pin below was published
+# more than 7 days before the run date (2026-09-07).
+# `docling` and its transitive closure (torch / Hugging Face / docling-*) are NOT
+# declared here — they are added to [project.dependencies] and installed +
+# supply-chain-validated by T046, immediately before path A's first use.
+dependencies = [
+    "pdfplumber==0.11.10",
+    "pypdfium2==5.13.0",
+    "python-docx==1.2.0",
+    "pydantic==2.13.5",
+    "httpx==0.28.1",
+    "rapidocr-onnxruntime==1.4.4",
+    "pytesseract==0.3.13",
+    "langdetect==1.0.9",
+    # Directly imported by shipped OCR code (was transitive via the packages above;
+    # promoted to explicit exact pins 2026-09-08 — no resolution change).
+    "numpy==2.5.2",          # RapidOcrEngine: page image -> ndarray for PP-OCR
+    "pillow==12.3.0",        # both OCR adapters: PIL.Image open/normalise
+    "onnxruntime==1.29.0",   # inference runtime the RapidOCR path executes on
+]
+
+[project.scripts]
+solari-convert = "solari_converter.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "reportlab==5.0.1",
+    "jiwer==4.0.0",
+    "rapidfuzz==3.14.6",   # benchmarks/ocr/run.py: reading-order line alignment
+    "lingua-language-detector==2.2.0",
+    "ruff==0.16.5",
+]
+
+[tool.uv]
+# Exact-pinned constraints for FOUNDATION transitive dependencies that would
+# otherwise resolve to a release younger than 7 days as of the T002 run date
+# (2026-09-07). These are ubiquitous base libraries, NOT the Docling/Torch/
+# Hugging Face closure. `numpy` moved to [project.dependencies] on 2026-09-08 (it
+# is imported directly by the OCR code) — same 2.5.2 pin, so resolution is
+# unchanged; the two entries below stay purely transitive.
+#   lxml  6.1.3 -> 2026-09-02 (pin 6.1.2, 2026-08-19)
+#   anyio 4.15.1 -> 2026-09-05 (pin 4.14.2, 2026-07-12)
+constraint-dependencies = [
+    "lxml==6.1.2",
+    "anyio==4.14.2",
+]
+
+[build-system]
+requires = ["hatchling==1.32.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/solari_converter"]
+
+# --- T003: ruff + pytest configuration -------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "benchmarks", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]
+# Fixture-builder / ground-truth modules: readability of the generated content
+# matters more than lint uniformity here.
+"tests/fixtures/**" = ["E501", "B007", "B905", "UP031"]
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests", "benchmarks"]
+addopts = ["-ra", "--strict-markers", "--strict-config", "-m", "not acceptance"]
+markers = [
+    "contract: JSON-Schema / CLI contract conformance",
+    "integration: per-user-story integration tests",
+    "acceptance: slow corpus / real-sample / OCR-benchmark-smoke tests (run explicitly with -m acceptance)",
+    "benchmark: OCR / table / native-reliability benchmark metric checks",
+]

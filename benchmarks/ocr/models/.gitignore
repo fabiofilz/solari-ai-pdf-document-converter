@@ -1,0 +1,11 @@
+# OCR model files are NOT committed (plan.md OCR ledger — "do not commit large
+# model binaries unless repository policy explicitly requires it"). The model +
+# its dictionary are acquired reproducibly at setup time:
+#   python benchmarks/ocr/models/fetch_latin_model.py   (verifies SHA256SUMS)
+# Tracked reproducibility record: README.md, SHA256SUMS, fetch_latin_model.py.
+*.onnx
+*.tar
+*.pdmodel
+*.pdiparams
+*.pdiparams.info
+latin_dict.txt

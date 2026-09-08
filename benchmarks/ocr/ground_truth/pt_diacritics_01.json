@@ -1,0 +1,17 @@
+{
+  "category": "pt_diacritics",
+  "columns": null,
+  "language": "pt",
+  "lines": [
+    "AÇÃO E CORAÇÃO",
+    "As informações a seguir são de responsabilidade do declarante.",
+    "José Antônio da Conceição, órfão, brasileiro, residente à Rua Ipê.",
+    "Não há óbice à averbação; três irmãos assinam em conjunto.",
+    "Observação: acentuação aguda (á), grave (à), circunflexa (â), til (ã)."
+  ],
+  "name": "pt_diacritics_01",
+  "reading_order": "top-to-bottom",
+  "scored": true,
+  "source": "synthetic (benchmarks/ocr/corpus/build_corpus.py) — exact ground truth",
+  "text": "AÇÃO E CORAÇÃO\nAs informações a seguir são de responsabilidade do declarante.\nJosé Antônio da Conceição, órfão, brasileiro, residente à Rua Ipê.\nNão há óbice à averbação; três irmãos assinam em conjunto.\nObservação: acentuação aguda (á), grave (à), circunflexa (â), til (ã)."
+}
