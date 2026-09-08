@@ -99,6 +99,8 @@
           "check_origin": { "enum": ["deterministic", "semantic"] },
           "reconciliation_ref": { "type": "string",
             "description": "decision_id in the reconciliation log; set on reconciliation_error so fix can route it (FR-045a)." },
+          "review_item_id": { "type": "string",
+            "description": "Set when this issue is a HUMAN-REVIEW VERIFICATION FAILURE (FR-084 / research §25.6): a human-confirmed decision could not be traced to / verified at its rendered Markdown span. Then check_origin='deterministic', severity='error', issue_type in {literal_mismatch (literal_altered), reading_order (order_not_reflected), missing_content (not_located)}, and `defect_class` is the ORIGINATING STAGE (H5) — NOT always reconciliation_error: 'reconciliation_error' when the CED does not carry the human-confirmed decision (routes back to `review`, FR-045a); 'disallowed_transformation' when the CED is correct but a stage-3/5 transform altered the rendered span or dropped the segment with no recorded collapsed_into (preferred repair: fix the code + re-run; escape hatch: `fix` + mandatory §25 re-verification); 'extraction_error' when the confirmed value itself was a source-evidence fault. `reconciliation_ref` is set when the human_confirmed decision id is known. `fix` branches on `defect_class` and never invents/applies a decision (FR-079)." },
           "source_location": { "type": "string" },
           "expected": { "type": "string" },
           "found": { "type": "string" },

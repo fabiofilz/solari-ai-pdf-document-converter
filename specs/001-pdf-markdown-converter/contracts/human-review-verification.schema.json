@@ -1,0 +1,309 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://solari.local/schemas/human-review-verification-2.1.json",
+  "title": "HumanReviewVerification",
+  "description": "The AUTHORITATIVE machine model for FR-083 location-aware verification and the FR-080-082 Human Review Report. One record per AUTHORIZED delivery attempt that had >= 1 applicable human-review decision (research §25 / §26) — written whether verification PASSES or FAILS (FR-084). The <base>_review_report.md is a RENDERING of this record (same 'one model renders both' rule as every FR-057 pair) and holds no state not derivable from: the human-review queue, the append-only resolution history (currently-applicable via sequence_index, research §22.2), the review-authorization event log, the RunContext, the RenderMap, and the delivered Markdown. Deterministic body (no wall-clock, no random id); the verification record + Report JOIN the FR-053a run-twice deterministic core (research §25.5 / §14). A `verification_failed` item is ALSO emitted as a validation issue with review_item_id + defect_class (FR-084 / research §25.6) and blocks successful delivery. v2.1 (audit remediation): lineage carries the ordered closed-enum `segment_transforms` chain (H1) and `collapsed_into` edges (M7); items carry `defect_class` = originating stage (H5); render span / per-segment spans / final-Markdown span+excerpt are null for `not_located` (H4); a segment may have MULTIPLE rendered spans (M11).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_type", "schema_version", "run_id", "tool_version",
+    "source_pdf", "source_sha256", "page_selection",
+    "delivered_markdown", "items", "summary"
+  ],
+  "properties": {
+    "record_type": { "const": "human_review_verification" },
+    "schema_version": { "const": "2.1" },
+    "run_id": { "type": "string", "pattern": "^[a-f0-9]{16}$" },
+    "tool_version": { "type": "string", "minLength": 1 },
+    "source_pdf": { "type": "string", "minLength": 1 },
+    "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "page_selection": { "type": "string", "minLength": 1 },
+    "delivered_markdown": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "markdown_sha256", "run_id"],
+      "description": "The Markdown artifact this record was verified against. `path` is `intermediates/<base>.<run_id>.unverified.md` while the delivery gate is open and becomes `<base>.md` only after step 5 of research §25.7 publishes it. Its `run_id` MUST equal the record `run_id` AND the `authorized_run_id` of a matching review-authorization event. Serialization is pinned by research §25.1 (binary UTF-8, no BOM, LF only, no Unicode normalization); `markdown_sha256` is sha256 of those exact bytes.",
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "markdown_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "run_id": { "type": "string", "pattern": "^[a-f0-9]{16}$" }
+      }
+    },
+    "items": {
+      "type": "array",
+      "description": "One VerificationItem per applicable human-review decision (the currently-applicable resolution per applicability_key, derived by sequence_index authority — research §22.2).",
+      "items": { "$ref": "#/$defs/verificationItem" }
+    },
+    "summary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["decisions_applicable", "resolved", "verified", "failed", "status"],
+      "description": "Counts + derived verdict. The Human Review Report PRINTS `status` VERBATIM (research §26) — it never re-decides PASS/FAIL.",
+      "properties": {
+        "decisions_applicable": { "type": "integer", "minimum": 1 },
+        "resolved": { "type": "integer", "minimum": 0,
+          "description": "Applicable decisions that have a currently-applicable human_confirmed resolution. This record is only ever written for an AUTHORIZED run (zero open items), so in practice `resolved == decisions_applicable` always — the field is kept for the Report's at-a-glance summary and as an explicit cross-check (L4)." },
+        "verified": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "status": { "enum": ["PASS", "FAIL"],
+          "description": "FR-080: PASS iff failed == 0 && verified == decisions_applicable; else FAIL. Purely derived from the counts — no separate stored verdict." }
+      }
+    }
+  },
+  "$defs": {
+    "span": {
+      "type": "object", "additionalProperties": false,
+      "required": ["start", "end"],
+      "description": "Half-open Unicode-codepoint offset range [start, end) into delivered_markdown_text := <artifact bytes>.decode('utf-8') (research §25.1). delivered_markdown_text[start:end] is the AUTHORITATIVE slice. A record MAY also carry derived byte offsets / line-col as cross-checks, but the codepoint offsets are the sole authority.",
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 },
+        "byte_start": { "type": "integer", "minimum": 0, "description": "OPTIONAL derived UTF-8 byte offset — integrity cross-check only, not authoritative." },
+        "byte_end": { "type": "integer", "minimum": 0, "description": "OPTIONAL derived UTF-8 byte offset — integrity cross-check only, not authoritative." }
+      }
+    },
+    "nullableSpan": {
+      "oneOf": [
+        { "$ref": "#/$defs/span" },
+        { "type": "null" }
+      ]
+    },
+    "segmentTransform": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "stage", "permitted_by"],
+      "description": "One deterministic operation that changed a segment's OWN character sequence between the CED literal and the rendered bytes (research §25.2, H1). CLOSED ENUM — not an open normalizer. Verification re-applies exactly this ordered chain and nothing else.",
+      "properties": {
+        "kind": {
+          "enum": ["dehyphenate", "reflow_whitespace", "markdown_escape", "html_escape", "cell_newline_br", "ocr_marker"],
+          "description": "dehyphenate (stage 3, FR-014); reflow_whitespace (stage 3, FR-013/FR-016); markdown_escape (stage 5, renderer contract for FR-012 output); html_escape (stage 5, FR-020-022 HTML table path); cell_newline_br (stage 5, FR-020-022); ocr_marker (stage 5, FR-025, inline marker only)." },
+        "stage": { "enum": [3, 5] },
+        "permitted_by": { "type": "string", "minLength": 1,
+          "description": "The FR (or renderer-contract reference) that permits this transform kind. MUST be consistent with `kind` per the research §25.2 table." },
+        "detail": { "type": ["string", "null"] }
+      }
+    },
+    "candidateEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["technique"],
+      "description": "One candidate shown to the reviewer (FR-062a/FR-062d/FR-075). Shared shape reused by the queue and resolution schemas (L3). Copied unchanged from the queue item for the Report (FR-081).",
+      "properties": {
+        "technique": { "type": "string", "minLength": 1 },
+        "value": { "type": "string" },
+        "order": { "type": "array", "items": { "type": "string" } },
+        "ocr_confidence": { "type": ["number", "null"] },
+        "provenance_label": { "type": "string" }
+      }
+    },
+    "structuralContext": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "Copied from the queue item for the Report (FR-081) — the section / table / row / column where the reviewed content sits, where known. `null` when no structural context was captured.",
+      "properties": {
+        "section_path": { "type": ["array", "null"], "items": { "type": "string" } },
+        "table_id": { "type": ["string", "null"] },
+        "row_index": { "type": ["integer", "null"] },
+        "column_index": { "type": ["integer", "null"] },
+        "note": { "type": ["string", "null"] }
+      }
+    },
+    "verificationItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "One applicable human-review decision traced review -> source-backed segment -> resolution -> CED -> semantic/render -> final-Markdown span, and checked THERE (research §25.3-25.5). NEVER by global string search (FR-083).",
+      "required": [
+        "review_item_id", "applicability_key", "conflict_type", "resolution_id",
+        "lineage", "expected",
+        "render_span", "per_segment_spans", "final_markdown_span_lc", "final_markdown_excerpt",
+        "status"
+      ],
+      "properties": {
+        "review_item_id": { "type": "string", "minLength": 1 },
+        "applicability_key": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "conflict_type": { "enum": ["literal_content", "reading_order"] },
+        "resolution_id": { "type": "string", "pattern": "^[a-f0-9]{16}$",
+          "description": "The currently-applicable resolution verified (FR-076), content-bound per human-review-resolution.schema.json v2.1." },
+        "lineage": {
+          "type": "object", "additionalProperties": false,
+          "description": "The review -> CED -> semantic -> render chain (research §25.3). `incomplete = true` (a hop could not be resolved) drives status=verification_failed / failure_reason=not_located.",
+          "required": ["accepted_segment_ids", "reconciliation_decision_id", "ced_accepted",
+            "semantic_block_ids", "render_span", "per_segment_spans", "segment_transforms", "incomplete"],
+          "properties": {
+            "accepted_segment_ids": { "type": "array", "items": { "type": "string" }, "minItems": 1,
+              "description": "1 for literal_content; N for reading_order." },
+            "reconciliation_decision_id": { "type": ["string", "null"],
+              "description": "The human_confirmed ReconciliationDecision id carried by the CED; `null` => the CED does not carry this decision => defect_class routes to reconciliation_error (research §25.6)." },
+            "ced_accepted": {
+              "description": "What the CED actually accepted for the reviewed location — literal: the AcceptedSegment.text (string); order: the CED accepted order of the reviewed segments (array of segment_id). Compared against `expected` for the reconciliation_error test (research §25.6).",
+              "oneOf": [
+                { "type": "string" },
+                { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                { "type": "null" }
+              ]
+            },
+            "semantic_block_ids": { "type": "array", "items": { "type": "string" },
+              "description": "SemanticDocument blocks whose provenance includes the accepted segments. Empty when the lineage is incomplete." },
+            "render_span": { "$ref": "#/$defs/nullableSpan" },
+            "per_segment_spans": {
+              "oneOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["segment_id", "spans"],
+                    "properties": {
+                      "segment_id": { "type": "string" },
+                      "spans": { "type": "array", "items": { "$ref": "#/$defs/span" },
+                        "description": "MAY be multiple (M11) — a merged HTML cell, a segment split across Markdown syntax. Ordered by `start`." },
+                      "via_collapsed_into": { "type": ["string", "null"],
+                        "description": "Set when this segment has no standalone span and verification followed a RenderMap `collapsed_into` edge to the retained segment_id (M7, research §25.2)." }
+                    }
+                  }
+                },
+                { "type": "null" }
+              ]
+            },
+            "segment_transforms": {
+              "oneOf": [
+                {
+                  "type": "array",
+                  "description": "Per reviewed segment, the ORDERED closed-enum transform chain applied to its own characters (research §25.2, H1). Replaces the old `segment_edits` (dehyphenate-only).",
+                  "items": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["segment_id", "transforms"],
+                    "properties": {
+                      "segment_id": { "type": "string" },
+                      "transforms": { "type": "array", "items": { "$ref": "#/$defs/segmentTransform" } }
+                    }
+                  }
+                },
+                { "type": "null" }
+              ]
+            },
+            "incomplete": { "type": "boolean",
+              "description": "true iff a lineage hop could not be resolved (no reconciliation_decision_id, no semantic_block_ids, or no rendered span AND no recorded collapsed_into). Forces not_located (research §25.5)." }
+          }
+        },
+        "expected": {
+          "oneOf": [
+            { "type": "object", "additionalProperties": false, "required": ["value"],
+              "description": "literal_content: the human-confirmed value VERBATIM (no strip / normalization / separator rewrite / BOM — FR-068 / FR-082).",
+              "properties": { "value": { "type": "string" } } },
+            { "type": "object", "additionalProperties": false, "required": ["order"],
+              "description": "reading_order: accepted_segment_ids in the human-confirmed sequence.",
+              "properties": { "order": { "type": "array", "items": { "type": "string" }, "minItems": 1 } } }
+          ]
+        },
+        "render_span": {
+          "$ref": "#/$defs/nullableSpan",
+          "description": "The authoritative rendered span for the whole reviewed location. NON-NULL iff the location resolved (failure_reason != not_located); `null` for not_located (H4, research §25.4)." },
+        "per_segment_spans": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["segment_id", "spans"],
+                "properties": {
+                  "segment_id": { "type": "string" },
+                  "spans": { "type": "array", "items": { "$ref": "#/$defs/span" } }
+                }
+              }
+            },
+            { "type": "null" }
+          ],
+          "description": "Where each reviewed segment's own text landed — MAY be multiple spans per segment (M11). NON-NULL iff the location resolved; `null` for not_located (H4)." },
+        "final_markdown_span_lc": {
+          "oneOf": [
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["start_line", "start_col", "end_line", "end_col"],
+              "properties": {
+                "start_line": { "type": "integer", "minimum": 1 },
+                "start_col": { "type": "integer", "minimum": 1 },
+                "end_line": { "type": "integer", "minimum": 1 },
+                "end_col": { "type": "integer", "minimum": 1 }
+              }
+            },
+            { "type": "null" }
+          ],
+          "description": "Derived from render_span, 1-based codepoint columns — DISPLAY ONLY; render_span (codepoint offsets) is authoritative. NON-NULL iff the location resolved; `null` for not_located (H4)." },
+        "final_markdown_excerpt": {
+          "type": ["string", "null"],
+          "description": "delivered_markdown_text[render_span.start : render_span.end] VERBATIM (codepoint slice). MUST NOT be .strip()'d, whitespace-collapsed, Unicode/punctuation-normalized, separator-rewritten, or wrapped in << >> (FR-082 / SC-034). Byte-identical to the corresponding span of the delivered artifact. `null` for not_located (H4, research §25.4)." },
+        "status": { "enum": ["applied_and_verified", "verification_failed"] },
+        "failure_reason": {
+          "enum": ["not_located", "literal_altered", "order_not_reflected", null],
+          "description": "Present (non-null) iff status = verification_failed (research §25.5). not_located: lineage incomplete / the reviewed segment has no rendered span and no recorded collapsed_into. literal_altered: the reviewed segment's own characters differ from apply(segment_transforms, expected.value) by something that is NOT an allowed transformation (interior spacing, a swapped decimal/thousand separator, a Unicode look-alike, punctuation). order_not_reflected: the rendered first-span order of the reviewed segments does not match the human-confirmed order and no valid logged structural_reorder covers it (M8)." },
+        "defect_class": {
+          "enum": ["reconciliation_error", "disallowed_transformation", "extraction_error", null],
+          "description": "Present (non-null) iff status = verification_failed — the ORIGINATING STAGE (research §25.6 / H5 / FR-034a). reconciliation_error: lineage.ced_accepted != expected (or reconciliation_decision_id is null / not human_confirmed) — reconciliation did not apply the decision; routes back to the `review` layer (FR-045a). disallowed_transformation: ced_accepted == expected but a stage-3/5 transform altered the rendered span outside the recorded segment_transforms chain, or the segment vanished with no recorded collapsed_into — a deterministic-code fault; preferred repair is a code fix + re-run, escape hatch is `fix` + MANDATORY §25 re-verification (research §22.7). extraction_error: the confirmed value itself was a source-evidence fault (rare)." },
+        "structural_context": { "$ref": "#/$defs/structuralContext" },
+        "source_context_before": { "type": ["string", "null"] },
+        "source_context_after": { "type": ["string", "null"] },
+        "candidates_presented": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/candidateEvidence" },
+          "description": "Copied from the queue item for the Report (FR-081). The SOURCE-context copy MAY carry report-only markers in the rendered .md; final_markdown_excerpt MUST NOT (FR-082)." }
+      },
+      "allOf": [
+        {
+          "description": "verification_failed => failure_reason and defect_class are non-null.",
+          "if": { "properties": { "status": { "const": "verification_failed" } } },
+          "then": {
+            "properties": {
+              "failure_reason": { "enum": ["not_located", "literal_altered", "order_not_reflected"] },
+              "defect_class": { "enum": ["reconciliation_error", "disallowed_transformation", "extraction_error"] }
+            },
+            "required": ["failure_reason", "defect_class"]
+          }
+        },
+        {
+          "description": "applied_and_verified => no failure fields, and the location resolved (spans + excerpt present).",
+          "if": { "properties": { "status": { "const": "applied_and_verified" } } },
+          "then": {
+            "properties": {
+              "failure_reason": { "const": null },
+              "defect_class": { "const": null },
+              "render_span": { "$ref": "#/$defs/span" },
+              "final_markdown_excerpt": { "type": "string" },
+              "final_markdown_span_lc": {
+                "type": "object",
+                "required": ["start_line", "start_col", "end_line", "end_col"]
+              }
+            }
+          }
+        },
+        {
+          "description": "not_located (H4) => every rendered-location field is null and the lineage is incomplete.",
+          "if": { "properties": { "failure_reason": { "const": "not_located" } } },
+          "then": {
+            "properties": {
+              "render_span": { "type": "null" },
+              "per_segment_spans": { "type": "null" },
+              "final_markdown_span_lc": { "type": "null" },
+              "final_markdown_excerpt": { "type": "null" },
+              "lineage": {
+                "properties": {
+                  "incomplete": { "const": true },
+                  "render_span": { "type": "null" },
+                  "per_segment_spans": { "type": "null" }
+                }
+              }
+            }
+          }
+        },
+        {
+          "description": "literal_altered / order_not_reflected => the location resolved, so render_span + excerpt are present (content/order is what is wrong).",
+          "if": {
+            "properties": { "failure_reason": { "enum": ["literal_altered", "order_not_reflected"] } },
+            "required": ["failure_reason"]
+          },
+          "then": {
+            "properties": {
+              "render_span": { "$ref": "#/$defs/span" },
+              "final_markdown_excerpt": { "type": "string" }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

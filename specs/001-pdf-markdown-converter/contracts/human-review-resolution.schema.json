@@ -1,28 +1,35 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://solari.local/schemas/human-review-resolution-2.0.json",
+  "$id": "https://solari.local/schemas/human-review-resolution-2.1.json",
   "title": "HumanReviewResolution",
-  "description": "One line of the append-only resolution store (resolutions.jsonl). FR-057b / FR-070 / FR-071.",
+  "description": "One line of the append-only resolution store (resolutions.jsonl). FR-057b / FR-070 / FR-071 / FR-076. Lines are ONLY ever appended; a changed answer is a NEW line; nothing is edited or removed. Each append is an ATOMIC WHOLE-FILE PUBLISH (read + append line + <store>.tmp + flush + fsync + os.replace) so a crash leaves the old file or the new complete file, never a torn line (audit remediation M3). v2.1: `resolution_id` is now content-bound and `sequence_index` is the sole authority for the currently-applicable record (invariants I1-I6, research §22.2).",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "record_type", "schema_version", "run_id", "tool_version",
     "source_pdf", "source_sha256", "page_selection",
+    "resolution_id", "sequence_index", "supersedes",
     "applicability_key", "review_item_id", "conflict_type",
     "physical_page", "region_bboxes", "candidates_presented",
     "decision_method", "selected"
   ],
   "properties": {
     "record_type": { "const": "human_review_resolution" },
-    "schema_version": { "const": "2.0" },
+    "schema_version": { "const": "2.1" },
     "run_id": { "type": "string", "pattern": "^[a-f0-9]{16}$",
       "description": "run_id of the run that created this resolution." },
     "tool_version": { "type": "string", "minLength": 1 },
     "source_pdf": { "type": "string", "minLength": 1 },
     "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "page_selection": { "type": "string", "minLength": 1 },
+    "resolution_id": { "type": "string", "pattern": "^[a-f0-9]{16}$",
+      "description": "CONTENT-BOUND (M1): sha256(canonical_json({applicability_key, sequence_index, selected}))[:16]. `selected` is the full decision payload ({mode, value} for literal, {order} for reading-order). This is a local-store traceability id for cross-references, NOT a cryptographic integrity digest (whole-file integrity is sha256 of the file; artifact identity is run_id). 16 hex is sufficient because sequence_index alone already makes each record unique within a store." },
+    "sequence_index": { "type": "integer", "minimum": 0,
+      "description": "THE AUTHORITY for ordering and 'currently-applicable' (H6). Application invariant I1: unique and STRICTLY INCREASING across the whole store; assigned = max(existing) + 1. The currently-applicable resolution for an applicability_key = the valid record with the GREATEST sequence_index for that key." },
+    "supersedes": { "type": ["string", "null"], "pattern": "^[a-f0-9]{16}$",
+      "description": "AUDIT LINKAGE ONLY — it does not independently select current state. Application invariants: I2 — when a resolution already exists for this applicability_key, `supersedes` = the resolution_id of the currently-applicable prior record for that key at append time; I3 — null IFF no prior record exists for this key; I4 — a non-null target MUST exist in the store, share this applicability_key, and have a LOWER sequence_index; I5 — the per-key `supersedes` graph is a simple chain (no cycles, forks, or orphans). I6 — the loader FAILS CLOSED for a key whose chain violates I2-I5 (raises the review item fresh; never guesses). Research §22.2." },
     "applicability_key": { "type": "string", "pattern": "^[a-f0-9]{64}$",
-      "description": "sha256(source_sha256 ⧺ conflict_type ⧺ canonical(page, region, aligned candidate-value set) ⧺ canonical_json(config_subset)) — research §22. Replay keys on this; the LAST record per key wins." },
+      "description": "sha256(source_sha256 ⧺ conflict_type ⧺ canonical(page, region, aligned candidate-value set) ⧺ canonical_json(config_subset)) — research §22. A changed context ⇒ key no longer matches ⇒ the stored decision is not replayed or silently reused (FR-071) ⇒ a fresh item." },
     "review_item_id": { "type": "string", "minLength": 1 },
     "conflict_type": { "enum": ["literal_content", "reading_order"] },
     "physical_page": { "type": "integer", "minimum": 1 },
@@ -32,15 +39,7 @@
     },
     "candidates_presented": {
       "type": "array", "minItems": 1,
-      "items": {
-        "type": "object", "additionalProperties": false,
-        "required": ["technique"],
-        "properties": {
-          "technique": { "type": "string", "minLength": 1 },
-          "value": { "type": "string" },
-          "order": { "type": "array", "items": { "type": "string" } }
-        }
-      }
+      "items": { "$ref": "#/$defs/candidateEvidence" }
     },
     "decision_method": { "const": "human_confirmed" },
     "selected": {
@@ -54,7 +53,7 @@
             "value": { "type": "string" },
             "from_technique": { "type": ["string", "null"] },
             "manually_verified": { "type": "boolean",
-              "description": "true for mode='entered' (FR-068b): the value was verified against the original PDF." }
+              "description": "true for mode='entered' (FR-068): verified against the original PDF. For mode='entered' the `value` is the reviewer's CONFIRMED INPUT VERBATIM — no .strip(), Unicode normalization, quote/separator rewrite, BOM stripping, or autocorrect (FR-068 / FR-082). For whitespace/newline-sensitive scripting input the normative path is `review resolve --value-file` (research §22.5)." }
           }
         },
         {
@@ -69,5 +68,19 @@
       ]
     },
     "reviewer_note": { "type": ["string", "null"] }
+  },
+  "$defs": {
+    "candidateEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["technique"],
+      "description": "One candidate shown to the reviewer (FR-062a/FR-062d/FR-075). Shared shape reused by the queue and verification schemas.",
+      "properties": {
+        "technique": { "type": "string", "minLength": 1 },
+        "value": { "type": "string" },
+        "order": { "type": "array", "items": { "type": "string" } },
+        "ocr_confidence": { "type": ["number", "null"] },
+        "provenance_label": { "type": "string" }
+      }
+    }
   }
 }

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://solari.local/schemas/run-context-2.0.json",
+  "title": "RunContext",
+  "description": "Persisted by extract/convert (<base>.run-context.json + .md) so the `review` workflow can recompute the CURRENT run_id after the resolution store changes, WITHOUT re-prompting the reviewer for OCR / reconciliation / LLM flags (audit remediation H3). It is the extract-stage effective-input tuple (research §14, the authoritative definition) minus the applicable-resolution digest, which `review` derives from the current store. Deterministic body; no wall-clock. `review` never mutates it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_type", "schema_version", "run_id", "tool_version",
+    "source_pdf", "source_sha256", "page_selection",
+    "extract_output_affecting_config"
+  ],
+  "properties": {
+    "record_type": { "const": "run_context" },
+    "schema_version": { "const": "2.0" },
+    "run_id": { "type": "string", "pattern": "^[a-f0-9]{16}$",
+      "description": "The run's run_id AT WRITE TIME (with whatever resolution digest applied then). `review` recomputes a possibly-different run_id from the fields below + the CURRENT applicable-resolution digest." },
+    "tool_version": { "type": "string", "minLength": 1 },
+    "source_pdf": { "type": "string", "minLength": 1 },
+    "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "page_selection": { "type": "string", "minLength": 1,
+      "description": "Canonical normalized selector token, or 'all' — the same value folded into run_id (research §14)." },
+    "extract_output_affecting_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ocr_engine", "ocr_languages_override", "ocr_confidence_threshold",
+        "reconcile_confidence_threshold", "enabled_extraction_paths"],
+      "description": "The EXTRACT-STAGE subset of research §14 output_affecting_config — the settings that determine the CED, the render, and therefore Human-Review verification. `gross_divergence_threshold` is NOT here (validate-stage only). run_id = sha256(source_sha256 ⧺ page_selection ⧺ tool_version ⧺ canonical_json(this object) ⧺ applicable_resolution_digest)[:16].",
+      "properties": {
+        "ocr_engine": { "type": "string", "minLength": 1 },
+        "ocr_languages_override": { "type": ["array", "null"], "items": { "type": "string" } },
+        "ocr_confidence_threshold": { "type": "integer" },
+        "reconcile_confidence_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "enabled_extraction_paths": {
+          "type": "array", "items": { "type": "string" }, "minItems": 1, "uniqueItems": true
+        },
+        "llm_model": { "type": ["string", "null"],
+          "description": "Present (non-null) only when the LLM was reachable for reconciliation this run and thus affected the CED." },
+        "llm_decode": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "temperature": { "const": 0 },
+            "seed": { "type": ["integer", "null"] }
+          }
+        }
+      }
+    }
+  }
+}

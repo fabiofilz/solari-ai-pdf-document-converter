@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://solari.local/schemas/human-review-authorization-2.1.json",
+  "title": "HumanReviewAuthorization",
+  "description": "One line of the APPEND-ONLY audit event log <base>.review-authorizations.jsonl (+ .md): the reviewer's explicit authorization to resume downstream processing for one decision set (FR-077, research §22.4). Written on 'Continue processing' (interactive) or `review authorize` (scripting) — NOT by resolving the last review item. It records a HUMAN ACTION, so it is NOT part of the FR-053a run-twice deterministic-core artifact-equality set (audit remediation M4). Its body carries no wall-clock / random id (project convention) so re-authorizing an unchanged decision set is an IDEMPOTENT NO-OP APPEND. AUTHORIZATION VALIDITY IS EXACTLY `authorized_run_id == current run_id` (M2) — there is no queue-file hash. Each append is an atomic whole-file publish (M3).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_type", "schema_version", "run_id", "tool_version",
+    "source_pdf", "source_sha256", "page_selection",
+    "authorized_run_id", "applicable_resolution_digest", "resolved_item_ids", "authorized_via"
+  ],
+  "properties": {
+    "record_type": { "const": "human_review_authorization" },
+    "schema_version": { "const": "2.1" },
+    "run_id": { "type": "string", "pattern": "^[a-f0-9]{16}$",
+      "description": "Envelope run_id — MUST equal authorized_run_id." },
+    "tool_version": { "type": "string", "minLength": 1 },
+    "source_pdf": { "type": "string", "minLength": 1 },
+    "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "page_selection": { "type": "string", "minLength": 1 },
+    "authorized_run_id": { "type": "string", "pattern": "^[a-f0-9]{16}$",
+      "description": "The run_id this authorization is bound to. A successful delivery REQUIRES an authorization event whose authorized_run_id equals the delivered artifacts' run_id (FR-072 / FR-077). Changing any decision ⇒ new run_id ⇒ no event matches ⇒ the run is resolved_unauthorized again." },
+    "applicable_resolution_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$",
+      "description": "sha256 over the sorted (applicability_key, canonical_json(selected)) pairs of the CURRENTLY-APPLICABLE resolution set replayed for this run (research §14). Audit evidence + a redundant cross-check of authorized_run_id." },
+    "resolved_item_ids": {
+      "type": "array", "items": { "type": "string", "minLength": 1 },
+      "description": "AUDIT EVIDENCE ONLY (M2) — the queue-item ids that were `resolved` at authorization time. NOT a validity gate: the derived run_state precedence already makes a newly raised item win (run_state=unresolved) regardless of a prior authorization." },
+    "authorized_via": {
+      "enum": ["interactive_continue", "cli_authorize"],
+      "description": "interactive_continue: the reviewer chose 'Continue processing' in the interactive terminal workflow. cli_authorize: `solari-convert review authorize`. Both require zero open items and are equally binding; both are keyed to run_id." }
+  }
+}

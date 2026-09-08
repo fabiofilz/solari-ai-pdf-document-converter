@@ -1,16 +1,17 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://solari.local/schemas/human-review-queue-2.0.json",
+  "$id": "https://solari.local/schemas/human-review-queue-2.1.json",
   "title": "HumanReviewQueue",
+  "description": "The HUMAN_REVIEW_REQUIRED queue for one run (research §22). v2.1 (audit remediation): `run_state` is a REQUIRED derived field with an explicit precedence (M11); `candidates` reuses the shared `candidateEvidence` $def (L3).",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "record_type", "schema_version", "run_id", "tool_version",
-    "source_pdf", "source_sha256", "page_selection", "items", "summary"
+    "source_pdf", "source_sha256", "page_selection", "items", "run_state", "summary"
   ],
   "properties": {
     "record_type": { "const": "human_review_queue" },
-    "schema_version": { "const": "2.0" },
+    "schema_version": { "const": "2.1" },
     "run_id": { "type": "string", "pattern": "^[a-f0-9]{16}$" },
     "tool_version": { "type": "string", "minLength": 1 },
     "source_pdf": { "type": "string", "minLength": 1 },
@@ -39,24 +40,38 @@
           "markdown_column": { "type": "integer", "minimum": 1 },
           "candidates": {
             "type": "array", "minItems": 1,
-            "description": "literal_content (FR-062a): [{technique, value, ocr_confidence?}]. reading_order (FR-062d): [{technique, order:[segment_id]}] and see segment_ids.",
-            "items": {
-              "type": "object", "additionalProperties": false,
-              "required": ["technique"],
-              "properties": {
-                "technique": { "type": "string", "minLength": 1 },
-                "value": { "type": "string" },
-                "order": { "type": "array", "items": { "type": "string" } },
-                "ocr_confidence": { "type": ["number", "null"] }
-              }
-            }
+            "description": "literal_content (FR-062a): candidateEvidence with `value` (+ optional ocr_confidence). reading_order (FR-062d): candidateEvidence with `order:[segment_id]`; see segment_ids. Shared `candidateEvidence` $def (L3) — same shape carried by human-review-resolution / human-review-verification.",
+            "items": { "$ref": "#/$defs/candidateEvidence" }
           },
           "segment_ids": {
             "type": "array", "items": { "type": "string" },
             "description": "reading_order items only: the exact segment set an --order resolution must permute (FR-062d/FR-069)."
-          }
+          },
+          "segment_refs": {
+            "type": "array", "items": { "type": "string" },
+            "description": "FR-075: internal source-segment ids the reviewed content maps to (for the terminal to locate/show; kept for literal_content too)."
+          },
+          "structural_context": {
+            "type": "object", "additionalProperties": false,
+            "description": "FR-075: where the extraction evidence knows it. All fields optional/nullable.",
+            "properties": {
+              "section_path": { "type": ["array", "null"], "items": { "type": "string" } },
+              "table_id": { "type": ["string", "null"] },
+              "row": { "type": ["integer", "null"], "minimum": 1 },
+              "column": { "type": ["integer", "null"], "minimum": 1 }
+            }
+          },
+          "source_context_before": { "type": ["string", "null"],
+            "description": "FR-075: short VERBATIM window of source text immediately before the disputed segment." },
+          "source_context_after": { "type": ["string", "null"],
+            "description": "FR-075: short VERBATIM window of source text immediately after the disputed segment." }
         }
       }
+    },
+    "run_state": {
+      "enum": ["unresolved", "delivery_blocked_verification_failed", "delivered",
+        "authorized", "resolved_unauthorized"],
+      "description": "DERIVED (FR-077, research §22.4), not a stored flag. Evaluated in an EXPLICIT PRECEDENCE — FIRST MATCH WINS (M11): (1) unresolved — any queue item still `open` after applying the resolution store I1-I6 (a newly raised item ALWAYS wins here, regardless of a prior authorization for an earlier run_id); (2) delivery_blocked_verification_failed — no open items AND a human_review_verification record for the current run_id with summary.status == FAIL; (3) delivered — no open items AND <base>.md on disk matches this run's render AND (if >=1 applicable decision) a PASS verification for the current run_id AND (for `convert`) a traceability record for the current run_id; (4) authorized — no open items AND a review-authorizations.jsonl line with authorized_run_id == current run_id (render/verification may still be pending — a restart re-runs them deterministically); (5) resolved_unauthorized — no open items and none of the above. The array order here is the precedence order. Source of truth is the queue + resolution store + authorization event log + verification record + delivered bytes. There is NO persisted 'in-progress' state."
     },
     "summary": {
       "type": "object", "additionalProperties": false,
@@ -64,6 +79,21 @@
       "properties": {
         "open": { "type": "integer", "minimum": 0 },
         "resolved": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "$defs": {
+    "candidateEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["technique"],
+      "description": "One candidate shown to the reviewer (FR-062a/FR-062d/FR-075). Shared shape reused by human-review-resolution.schema.json and human-review-verification.schema.json (L3).",
+      "properties": {
+        "technique": { "type": "string", "minLength": 1 },
+        "value": { "type": "string" },
+        "order": { "type": "array", "items": { "type": "string" } },
+        "ocr_confidence": { "type": ["number", "null"] },
+        "provenance_label": { "type": "string",
+          "description": "FR-075: human-readable source label shown in the terminal, e.g. 'layout path (docling), p.5' / 'OCR (tesseract; pt; conf 82)'." }
       }
     }
   }

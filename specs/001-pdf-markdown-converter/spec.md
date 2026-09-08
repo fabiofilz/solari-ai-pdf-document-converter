@@ -10,6 +10,10 @@
 
 ## Clarifications
 
+### Session 2026-09-08
+
+- Q: (Refines the human-review workflow — FR-067–FR-074) How does a reviewer interact with HUMAN_REVIEW_REQUIRED items, how are decisions persisted and authorized, and how is the delivered Markdown verified against them? → A: The workflow is an **interactive terminal mode** of the command-line application — keyboard-driven (Up / Down / Enter to move through selectable options; no numeric-menu typing as the normal interaction), with **no** GUI, browser UI, local web server, OS-specific desktop application, or page-image / cropped-image previews. Each item shows enough context to locate and verify the disputed content against the original PDF (page, section, table / row / column, source context before and after, candidates, and a provenance label per candidate); a literal conflict offers the candidates plus **"Enter another value…"**, and an entered value is stored **exactly as typed** — never autocorrected, normalized, rewritten, or re-spaced. Every confirmed decision is persisted **immediately, before advancing**, and survives Ctrl+C / exit / terminal closure / process kill / machine restart; reopening resumes at the next unresolved applicable item and never re-asks resolved ones. A resolved item stays **reopenable and re-decidable**; changing an answer is append-only — the prior decision is retained in the audit history. Resolving the **last** item does **not** auto-resume processing: the workflow stops and offers **Review answers / Continue processing / Save and exit** (and, when reopened with everything already resolved but not authorized, **Review answers / Continue processing / Exit**); only "Continue processing" is explicit authorization. After authorization, human-confirmed resolutions flow through reconciliation → CED → deterministic semantic transformation → validation → render — **never** by patching the Markdown. When a delivery has one or more applicable human-review decisions, it also includes a **human-readable Markdown Human Review Report** (`<output-base>_review_report.md`) — a verification aid, not the authoritative audit log — whose per-item "Final Markdown" evidence is copied **literally** from the delivered artifact (no trim / strip / whitespace-collapse / Unicode- or punctuation-normalization / separator-rewrite / `<< >>` highlighting; report-only markers are allowed only on the *source-context* representation). Verification is **location-aware** — anchored to the reviewed source segment's processing lineage to its rendered Markdown span, not to any textual match elsewhere — and distinguishes an unauthorized literal alteration from a specification-permitted transformation. Each applicable decision gets an explicit **APPLIED AND VERIFIED** / **NOT APPLIED — VERIFICATION FAILED** status; a run with any failed verification is not a successful delivery (any Markdown produced exists only as a run-scoped non-deliverable intermediate, never at the delivered-Markdown name; the failure enters the validation/audit path classified by its originating stage — `reconciliation_error` or `disallowed_transformation`). This refines FR-067–FR-074 and adds FR-075–FR-084; it preserves the 0.75 reconciliation threshold, the candidate-selection restrictions, the LLM non-rewrite rules, `human_confirmed` semantics, deterministic replay/applicability, unresolved-review delivery blocking, and the `review` vs `fix` distinction.
+
 ### Session 2026-09-07
 
 - Q: (Clarifies the v1 language scope) Which languages does v1 support, and what is out of scope? → A: v1 targets **Latin-script Western-language** documents. **Primary validated languages: Portuguese, English, Spanish** — these are the OCR-benchmark and release-acceptance-corpus dimensions. **French, Italian, German** must work through the same Latin-script OCR / pipeline path (character-coverage compatible; no Portuguese-specific hard-coding) but are **not** primary scored dimensions. **CJK and other non-Latin writing systems (Chinese, Japanese, Korean, …) are explicitly out of scope for v1.** OCR language identifiers stay generic BCP-47 / ISO-style strings (no enum in the schemas or data model), so a future writing system is an additive change — a new OCR model plus corpus — with no data-model or contract redesign. This **narrows** the earlier "language-agnostic … at least Latin-script" assumption; it changes no functional requirement.
@@ -72,7 +76,13 @@ page selections; confirm the Markdown reproduces the source text, preserves
 heading hierarchy and tables, removes artifacts, uses the expected deterministic
 filename without overwriting anything, and that a page engineered to make the
 extraction paths disagree below the confidence threshold produces a
-HUMAN_REVIEW_REQUIRED item rather than a silently-guessed Markdown.
+HUMAN_REVIEW_REQUIRED item rather than a silently-guessed Markdown. Then run the
+interactive `review` workflow: resolve the item with the keyboard, confirm the
+decision is persisted before advancing and survives an interruption, confirm the
+workflow stops for an explicit "Continue processing" authorization rather than
+auto-resuming, and confirm the authorized run delivers the final Markdown **plus**
+a Human Review Report whose per-item final-Markdown evidence matches the delivered
+document exactly and whose verification status is APPLIED AND VERIFIED.
 
 **Acceptance Scenarios**:
 
@@ -128,11 +138,54 @@ HUMAN_REVIEW_REQUIRED item rather than a silently-guessed Markdown.
    the literal text is not rewritten or re-segmented, and the run delivers no final
    Markdown until the ordering is confirmed.
 11. **Given** a HUMAN_REVIEW_REQUIRED item whose literal candidates are all wrong,
-   **When** the reviewer enters the correct value verified against the original PDF
-   and re-runs, **Then** the value is recorded as `human_confirmed` with
-   manually-verified provenance, the run completes to a final Markdown without any
-   hand-editing of the Markdown, and a later identical run replays that resolution
-   instead of asking again.
+   **When** the reviewer selects "Enter another value…" and types the correct value
+   verified against the original PDF, **Then** the value is stored **exactly as
+   typed** (no autocorrect, normalization, re-spacing, or separator rewrite),
+   recorded as `human_confirmed` with manually-verified provenance, and a later
+   identical run replays that resolution instead of asking again.
+12. **Given** an open HUMAN_REVIEW_REQUIRED item presented in the interactive
+   `review` workflow, **When** the reviewer moves through the candidates with the
+   Up/Down arrows and presses Enter on one, **Then** the choice is confirmed
+   without the reviewer typing a numeric menu index, and the item shows the PDF
+   page, section / table / row / column where available, the source context before
+   and after the disputed segment, and a provenance label for each candidate.
+13. **Given** a `review` session in which the reviewer has confirmed some but not
+   all items, **When** the process is interrupted (Ctrl+C, terminal closure, or a
+   kill) and `review` is reopened, **Then** the already-confirmed decisions are
+   still present, none of them is asked again, and the workflow resumes at the next
+   unresolved applicable item.
+14. **Given** a `review` session where the reviewer answers the final unresolved
+   item, **When** that answer is confirmed, **Then** document processing does **not**
+   resume automatically; the workflow stops and presents an interactive choice
+   equivalent to "Review answers", "Continue processing", and "Save and exit", and
+   only choosing "Continue processing" authorizes the pipeline to resume.
+15. **Given** a run whose review items are all resolved but which was exited with
+   "Save and exit" (processing never authorized), **When** `review` is reopened,
+   **Then** it recognises that state and offers a choice equivalent to "Review
+   answers", "Continue processing", and "Exit" — it never continues automatically
+   just because every item is resolved.
+16. **Given** a previously resolved review decision, **When** the reviewer opens
+   "Review answers", selects that entry with the keyboard, and records a different
+   value or order, **Then** the prior decision is retained in the audit history
+   (previous decision, replacement decision, and which is currently applicable are
+   all recoverable) and the new decision re-propagates through reconciliation, the
+   Canonical Extracted Document, semantic transformation, and validation — never by
+   editing the delivered Markdown.
+17. **Given** an authorized run that had at least one applicable human-review
+   decision, **When** the final Markdown is delivered, **Then** a Human Review
+   Report `<output-base>_review_report.md` is delivered alongside it; for each
+   applicable decision the report shows the source location and context, the
+   candidates, the human-confirmed value/order, the corresponding final-Markdown
+   excerpt copied **literally** from the delivered document, and an explicit
+   APPLIED AND VERIFIED status; and the report summary shows PASS with the count of
+   decisions applicable, resolved, and verified.
+18. **Given** an authorized run where the final Markdown at a reviewed segment's
+   rendered location differs from the human-confirmed literal only by spacing, a
+   thousand separator, or a punctuation character, **When** final verification
+   runs, **Then** that decision's status is NOT APPLIED — VERIFICATION FAILED, the
+   run is not presented as a successful delivery, and the failed item (with its
+   expected decision and the actual final-Markdown evidence) appears in the Human
+   Review Report and enters the `reconciliation_error` validation workflow.
 
 ---
 
@@ -304,6 +357,13 @@ and no network egress occurred.
 5. **Given** the same PDF and the same page selection, **When** the user runs
    `convert` twice, **Then** both runs produce the same output filenames and the
    same Markdown content.
+6. **Given** a `convert` run whose `extract` stage raises HUMAN_REVIEW_REQUIRED
+   items, **When** the run reaches the review queue, **Then** `convert` stops
+   before `validate`, delivers no final Markdown or traceability record, and
+   resumes only after the items are resolved through the interactive `review`
+   workflow **and** the reviewer explicitly authorizes downstream processing; the
+   completed run then also delivers the Human Review Report and links it in the
+   traceability record.
 
 ---
 
@@ -346,16 +406,66 @@ and no network egress occurred.
   and not supported by geometry**: rejected programmatically → reading-order
   HUMAN_REVIEW_REQUIRED (FR-061b/FR-061d).
 - **None of the extraction candidates is correct for a literal-content conflict**:
-  the reviewer enters the correct value after verifying it against the original
-  PDF; it is recorded as `human_confirmed` with manually-verified provenance
-  (FR-068). No automatic stage may do this.
+  the reviewer selects "Enter another value…" and types the correct value after
+  verifying it against the original PDF; it is stored **exactly as typed** (no
+  autocorrect / normalization / re-spacing / separator rewrite) and recorded as
+  `human_confirmed` with manually-verified provenance (FR-068). No automatic stage
+  may do this.
 - **A recorded human resolution's context has changed on a later run** (e.g. a
   different OCR confidence threshold, a different extraction engine, a page
-  selection that shifts the affected region): the resolution is **not** replayed;
-  a fresh HUMAN_REVIEW_REQUIRED item is raised (FR-071).
-- **The user re-runs after resolving every review item**: processing resumes from
-  the appropriate reconciliation state and completes to a final Markdown; the user
-  never edits the generated Markdown by hand to finish the run (FR-072).
+  selection that shifts the affected region): the resolution is **not** replayed
+  or silently reused; a fresh HUMAN_REVIEW_REQUIRED item is raised (FR-071 /
+  FR-079).
+- **A `review` session is interrupted after some answers are confirmed** (Ctrl+C,
+  terminal closure, process kill, machine restart): every confirmed decision was
+  persisted before the workflow advanced, so on reopening none of them is asked
+  again and the workflow resumes at the next unresolved applicable item (FR-070).
+- **The reviewer answers the last unresolved item**: processing does **not** resume
+  automatically; the workflow stops and offers "Review answers" / "Continue
+  processing" / "Save and exit", and only "Continue processing" authorizes the
+  pipeline to resume (FR-077).
+- **`review` is reopened when every item is already resolved but processing was
+  never authorized**: the workflow recognises the "all resolved, not authorized"
+  state and offers "Review answers" / "Continue processing" / "Exit" — it never
+  continues automatically merely because the queue is empty (FR-077).
+- **The reviewer reopens an earlier resolved item and records a different answer**:
+  the prior decision is retained in the append-only audit history (previous,
+  replacement, and currently-applicable decision all recoverable) and the new
+  decision re-propagates through reconciliation → CED → semantic transformation →
+  validation → render, never by editing the Markdown (FR-076 / FR-079).
+- **After authorization, the pipeline resumes**: applicable human-confirmed
+  resolutions flow through reconciliation and the Canonical Extracted Document into
+  deterministic semantic transformation and final validation; the user never edits
+  the generated Markdown by hand to finish the run (FR-072 / FR-079).
+- **The human-confirmed value also appears verbatim elsewhere in the final
+  Markdown**: final verification is location-aware — it confirms the decision at the
+  reviewed source segment's rendered Markdown span via its processing lineage, not
+  at the first textual match (FR-083).
+- **The final Markdown at the reviewed span differs from the human-confirmed
+  literal only by spacing, a thousand/decimal separator, a punctuation character,
+  or a Unicode variant**: verification does **not** treat it as equivalent; the
+  decision is marked NOT APPLIED — VERIFICATION FAILED and successful delivery is
+  blocked (FR-083 / FR-084).
+- **An allowed structural transformation occurs around a reviewed segment** (e.g. a
+  pipe table becomes an HTML `<table>`, a paragraph is reflowed) while the reviewed
+  literal is preserved intact: verification passes, and the Human Review Report
+  shows the **actual delivered excerpt** (HTML / reflowed) around the unchanged
+  literal (FR-082 / FR-083).
+- **Final verification fails for one applicable human-review decision while others
+  pass**: the Markdown may be written as a non-successful / intermediate output,
+  successful delivery is blocked, the failed item plus its human-confirmed expected
+  decision and the actual final-Markdown evidence are recorded in the Human Review
+  Report, and the failure enters the final-fidelity-validation / audit workflow
+  classified by its originating stage — `reconciliation_error` or
+  `disallowed_transformation` (FR-084) — rather than being ignored (FR-034a /
+  FR-073).
+- **A reading-order HUMAN_REVIEW_REQUIRED item**: the reviewer chooses / reorders
+  the existing source-backed segments in the interactive workflow and MUST NOT
+  rewrite any segment's literal content as part of an order-only resolution; all
+  cross-cutting human-review rules — immediate persistence, resumability, answer
+  browsing, append-only history, explicit authorization, downstream replay,
+  location-aware final verification, and Human Review Report inclusion — apply to
+  the order decision as well (FR-069).
 - **Final fidelity validation finds an earlier reconciliation decision was wrong**
   (wrong literal selection or wrong accepted reading order): the issue is routed
   back to the human-review layer, not patched by `fix`; the corrected decision
@@ -553,7 +663,7 @@ all **stage-3 semantic transformations** and MUST NOT occur before reconciliatio
   original PDF and persisted as an auditable `human_confirmed` reconciliation
   decision. The resolution lifecycle — how it is resolved, what is persisted, how
   it is replayed, and how it unblocks the run — is specified in *Human review
-  workflow* (FR-067–FR-074).
+  workflow* (FR-067–FR-084).
 - **FR-062c**: Any unresolved HUMAN_REVIEW_REQUIRED item blocks delivery of the
   final Markdown for the run (FR-072); intermediate artifacts and the human-review
   queue MAY still be written for diagnosis.
@@ -615,9 +725,10 @@ all **stage-3 semantic transformations** and MUST NOT occur before reconciliatio
   locations reported by `validate`.
 - **FR-066a**: The externally invocable **document-processing** operations remain
   `extract`, `validate`, `fix`, `export`, and `convert`. In addition, the
-  human-review workflow (FR-067–FR-074) is driven through its own dedicated
-  operation — the `review` command at the CLI/contract layer, whose name and
-  interaction surface FR-074 delegates to planning/contracts. The tool's full
+  human-review workflow (FR-067–FR-084) is driven through its own dedicated
+  operation — the `review` command at the CLI layer — which is an **interactive,
+  keyboard-driven terminal mode** (FR-074); the specific terminal-interaction
+  library and file formats are planning / contract decisions. The tool's full
   invocable surface is therefore these five document-processing operations **plus**
   the separate human-review operation. `extract` performs stages 1–3 plus a
   built-in final fidelity self-check. When reconciliation raises HUMAN_REVIEW_REQUIRED
@@ -640,8 +751,10 @@ all **stage-3 semantic transformations** and MUST NOT occur before reconciliatio
 #### Human review workflow
 
 *HUMAN_REVIEW_REQUIRED is a first-class part of extraction reconciliation, not a
-validation warning. This subsection defines its lifecycle; the concrete
-interaction mechanism is a planning/contract decision (FR-074).*
+validation warning. This subsection defines its lifecycle and its interaction
+model (an interactive terminal workflow — FR-074); the specific terminal-interaction
+library, file formats, and lineage / Markdown-span data structures remain
+planning / research / data-model / contract decisions.*
 
 - **FR-067**: HUMAN_REVIEW_REQUIRED is an explicit **reconciliation state**. It is
   raised whenever an automatic reconciliation decision cannot be made at or above
@@ -652,46 +765,69 @@ interaction mechanism is a planning/contract decision (FR-074).*
   a HUMAN_REVIEW_REQUIRED item and MUST NOT guess.
 - **FR-068** (resolving a literal-content conflict): A reviewer resolves the item
   by inspecting the original PDF and either (a) selecting one of the extraction
-  candidates presented, or (b) entering the correct literal text / value directly
-  — **only** when none of the candidates is correct, and only after verifying it
-  against the original PDF. A human-entered literal value is permitted **only**
-  through this explicit human-review workflow; it MUST be recorded as
+  candidates presented, or (b) choosing **"Enter another value…"** and typing the
+  correct literal text / value directly — **only** when none of the candidates is
+  correct, and only after verifying it against the original PDF. A human-entered
+  literal value is permitted **only** through this explicit human-review workflow;
+  it MUST be captured **exactly as the reviewer types it** and recorded as
   `human_confirmed` source truth whose provenance states it was manually verified
-  against the original PDF. This human exception grants no automatic stage, and no
-  LLM, any permission to invent, correct, rewrite, normalize, or substitute source
-  text — FR-029, FR-037, FR-044, and FR-061a remain fully in force.
+  against the original PDF. The system MUST NOT autocorrect, normalize, rewrite,
+  suggest a replacement for, or alter the punctuation, spacing, Unicode, or
+  decimal / thousand separators of an entered value — an entered value represents
+  an explicitly human-verified source literal. This human exception grants no
+  automatic stage, and no LLM, any permission to invent, correct, rewrite,
+  normalize, complete, merge, split, or substitute source text — FR-029, FR-037,
+  FR-044, and FR-061a remain fully in force.
 - **FR-069** (resolving a reading-order conflict): A reviewer resolves the item by
-  ordering the **existing** source-backed segments after inspecting the original
-  PDF. The reviewer MAY reorder those segments; the reviewer MUST NOT silently
-  rewrite their literal content — a literal-content error noticed during a
-  reading-order review MUST be raised as its own literal-content review item
-  (FR-068), not fixed inline.
-- **FR-070** (persisted resolution): Every human resolution MUST be persisted as an
-  auditable reconciliation decision identifying at least: the source document
-  identity / hash; the relevant page / region; the conflict type; the candidate
-  evidence originally presented; the selected candidate or the human-entered
-  literal value, where applicable; the accepted segment ordering, for a
-  reading-order conflict; the decision method `human_confirmed`; and provenance
-  sufficient to trace the decision to the originating review item. Once persisted,
-  the item MUST NOT be treated as unresolved.
+  choosing / reordering the **existing** source-backed segments after inspecting
+  the original PDF. An order-only resolution MUST NOT permit literal rewriting of
+  any segment — a literal-content error noticed during a reading-order review MUST
+  be raised as its own literal-content review item (FR-068), not fixed inline. All
+  cross-cutting human-review rules — immediate persistence and resumability
+  (FR-070), reopen-and-change with append-only history (FR-076), explicit
+  processing authorization (FR-077), review-answer browsing (FR-078), downstream
+  replay through reconciliation and the Canonical Extracted Document (FR-079), and
+  location-aware final verification plus Human Review Report inclusion (FR-080–
+  FR-084) — apply equally to reading-order decisions.
+- **FR-070** (persisted resolution — immediate and resumable): Every human
+  resolution MUST be persisted as an auditable reconciliation decision identifying
+  at least: the source document identity / hash; the relevant page / region; the
+  conflict type; the candidate evidence originally presented; the selected
+  candidate or the human-entered literal value, where applicable; the accepted
+  segment ordering, for a reading-order conflict; the decision method
+  `human_confirmed`; and provenance sufficient to trace the decision to the
+  originating review item. Each confirmed decision MUST be persisted
+  **immediately, before the workflow advances to the next item**. The persisted set
+  of confirmed decisions MUST survive Ctrl+C, a voluntary exit, terminal closure,
+  process termination, and a machine restart; a reviewer reopening the workflow
+  MUST NOT be asked to resolve an already-resolved applicable item again, and the
+  normal resume behaviour continues from the next unresolved applicable item. Once
+  persisted, the item MUST NOT be treated as unresolved (it MAY still be reopened
+  and re-decided — FR-076).
 - **FR-071** (replay and reproducibility): A recorded `human_confirmed` resolution
   is an explicit **deterministic input** to later processing — never hidden
   nondeterministic state. When a later run reaches the same conflict and the
   resolution's applicability context is identical, the system SHOULD replay the
   recorded resolution instead of asking again, and replaying an unchanged
   `human_confirmed` decision MUST produce the same reconciliation result. The
-  system MUST NOT replay a resolution when output-affecting context relevant to
-  that decision has changed. The exact deterministic applicability key is a
-  planning decision, but it MUST carry enough source and configuration identity to
-  prevent applying a resolution to the wrong document or an incompatible
+  system MUST NOT replay — and MUST NOT silently reuse — a resolution when
+  output-affecting context relevant to that decision has changed; it raises a fresh
+  HUMAN_REVIEW_REQUIRED item instead. The exact deterministic applicability key is
+  a planning decision, but it MUST carry enough source and configuration identity
+  to prevent applying a resolution to the wrong document or an incompatible
   extraction context.
-- **FR-072** (blocking): Any unresolved HUMAN_REVIEW_REQUIRED item MUST block
-  delivery of the final Markdown for the run. A partially resolved document MUST
-  NOT be produced or presented as a complete final artifact. Intermediate
-  extraction / reconciliation artifacts and the human-review queue MAY still be
-  written for diagnosis and review. Once every required review item is resolved,
-  processing MUST be able to resume from the appropriate reconciliation state
-  **without** the user hand-editing the generated Markdown.
+- **FR-072** (blocking and the delivery gate): Any unresolved HUMAN_REVIEW_REQUIRED
+  item MUST block **successful delivery** of the final Markdown for the run. A
+  partially resolved document MUST NOT be produced or presented as a complete final
+  artifact. Intermediate extraction / reconciliation artifacts and the human-review
+  queue MAY still be written for diagnosis and review. Resolving every item is
+  necessary but **not sufficient**: even when the queue is empty, downstream
+  processing and delivery remain paused until the reviewer gives **explicit
+  authorization to continue** (FR-077), and successful delivery additionally
+  requires that every applicable human-review decision passes location-aware final
+  verification in the delivered Markdown (FR-083 / FR-084). Once authorization is
+  given, processing MUST resume from the appropriate reconciliation state
+  **without** the user hand-editing the generated Markdown (FR-079).
 - **FR-073** (relationship to `fix`): Human review and `fix` have distinct
   responsibilities. Human review resolves **uncertainty during extraction
   reconciliation**; `fix` addresses **defects that final fidelity validation
@@ -708,12 +844,179 @@ interaction mechanism is a planning/contract decision (FR-074).*
   routing happens when that issue is acted on — `fix` performs it (FR-045a), and a
   user reading a standalone `validate` report is directed to the human-review
   workflow rather than to a manual Markdown edit.
-- **FR-074** (interaction mechanism): The system MUST provide an explicit,
-  supported human-review workflow implementing the lifecycle above (raise →
-  present evidence → human resolves against the source → persist as
-  `human_confirmed` → replay when applicable → unblock). Its concrete form — CLI
-  subcommand name, interactive UI, queue / resolution file format, command syntax
-  — is a planning / contract decision and is out of scope for this specification.
+- **FR-074** (interaction model — interactive terminal): The system MUST provide an
+  explicit, supported human-review workflow implementing the lifecycle above (raise
+  → present evidence → human resolves against the source → persist as
+  `human_confirmed` → authorize → replay / re-propagate → verify → unblock). This
+  workflow MUST be an **interactive terminal mode** of the command-line application
+  (the `review` operation — FR-066a). It MUST be keyboard-driven: the reviewer
+  navigates selectable options with the **Up Arrow**, **Down Arrow**, and **Enter**
+  keys, and MUST NOT be required to type numeric menu choices (`1`, `2`, `3`, …) as
+  the normal interaction. It MUST NOT require a graphical desktop application, a
+  browser-based UI, a local web server, a desktop-application framework, an
+  OS-specific native application, or the generation of page images or cropped image
+  previews for the review workflow. The specification does not select a
+  terminal-interaction library; the library, the resolution-store and queue file
+  formats, the review-item and lineage schemas, and the Markdown-span
+  representation are planning / research / data-model / contract decisions.
+- **FR-075** (review-item presentation): For each open HUMAN_REVIEW_REQUIRED item
+  the workflow MUST present enough human-facing information for the reviewer to
+  locate and verify the disputed content against the original PDF, including where
+  available: the physical PDF page; the section or structural context; the table
+  identifier; the row; the column; the surrounding source text immediately before
+  and after the disputed segment; the candidate values (literal-content) or
+  candidate orders (reading-order); and an extraction-source / provenance label for
+  each candidate. Source geometry / bounding boxes MUST remain available internally
+  where required for traceability, but the workflow is **not** required to display
+  graphical geometry or generate image crops. For a literal-content conflict the
+  selectable options conceptually are: candidate A; candidate B; any further
+  candidates; and **"Enter another value…"** (FR-068).
+- **FR-076** (reopen and change; append-only decision history): A previously
+  resolved human-review item MUST remain reviewable, and the reviewer MUST be able
+  to reopen it and record a different decision. A changed answer MUST NOT
+  destructively erase the prior decision from the authoritative audit history. The
+  system MUST preserve an append-only / auditable sequence sufficient to determine,
+  per item: the previous decision; the replacement decision; which decision is
+  currently applicable; and the provenance / context under which each decision was
+  made. The resolution store's append-only nature (FR-057b) and the applicability /
+  replay rules (FR-071) remain authoritative — a changed answer is a new record,
+  the superseded record is retained.
+- **FR-077** (review completion is not authorization to continue): Resolving the
+  last unresolved human-review divergence MUST NOT automatically resume document
+  processing. The workflow MUST distinguish at least three states: (1) unresolved
+  review items remain; (2) all review items are resolved but downstream processing
+  is not yet authorized; (3) downstream processing has been explicitly authorized.
+  After the final unresolved item is answered the workflow MUST stop and present an
+  interactive choice conceptually equivalent to **Review answers**, **Continue
+  processing**, and **Save and exit** — where "Continue processing" constitutes the
+  reviewer's **explicit authorization** to resume downstream document processing,
+  "Review answers" opens the review-answer browser (FR-078), and "Save and exit"
+  persists the complete review state and does not continue processing. When the
+  workflow is opened again and all items are already resolved but processing has
+  not been authorized or completed, it MUST recognise that state and present a
+  choice conceptually equivalent to **Review answers**, **Continue processing**,
+  and **Exit**. No automatic continuation is permitted merely because every review
+  item is resolved.
+- **FR-078** (review-answer browsing): The "Review answers" experience MUST also be
+  interactive and keyboard-navigable — the reviewer moves through the previously
+  resolved decisions with the Up / Down arrows and Enter. Each summary entry MUST
+  carry enough identifying information to distinguish it — such as page, section /
+  table location, the reviewed field or context, and the currently confirmed value
+  or order. Selecting an entry MUST reopen that decision's review details, from
+  which it may be changed (FR-076).
+- **FR-079** (decisions flow through the pipeline; never patched into Markdown):
+  Confirmed human-review resolutions MUST NOT be applied by directly editing or
+  patching the final Markdown artifact. After explicit authorization to continue
+  (FR-077), each **applicable** human-confirmed resolution MUST flow through the
+  authoritative processing pipeline: human-confirmed resolution → extraction
+  reconciliation → Canonical Extracted Document → deterministic semantic
+  transformation → final fidelity validation → final Markdown rendering / delivery.
+  A resolution that is no longer applicable because an output-affecting context
+  changed MUST NOT be silently reused (FR-071). A `reconciliation_error` discovered
+  later still routes back to reconciliation / human review (FR-045a / FR-073),
+  never a silent Markdown edit.
+- **FR-080** (Human Review Report — existence, identity, purpose): When a run
+  contains one or more **applicable** human-review decisions and downstream
+  processing has been authorized, the delivered result MUST include a
+  human-readable **Human Review Report** in Markdown, in addition to the final
+  Markdown document. Its conceptual name is `<output-base>_review_report.md`. The
+  report is **not** the authoritative technical audit log — that remains the
+  reconciliation log and the human-review resolution store (FR-057 / FR-057a /
+  FR-057b) — and it is not one of the machine-readable stores those requirements
+  govern. Its purpose is to let a human inspecting the delivered final document
+  confirm that every requested human-review decision was actually reflected in it.
+  The report MUST include a summary stating at least: the source document identity;
+  the final Markdown output identity; the number of human-review decisions
+  applicable to this delivery; the number resolved; the number successfully
+  verified in the final Markdown; the number that failed final-application
+  verification; and an overall **PASS / FAIL** review-verification status.
+- **FR-081** (Human Review Report — per-item content): For every applicable
+  human-review decision the report MUST provide enough human-readable evidence to
+  answer: where in the original PDF the divergence was; what surrounding source
+  context identifies it; what candidate values or orders were available; what the
+  human confirmed; what corresponding content was actually rendered in the final
+  Markdown; and whether that decision was successfully applied and verified. Where
+  applicable it MUST include: PDF page; section; table; row; column;
+  extraction-source labels; the source context before and after the disputed
+  segment; the human-confirmed value or order; the corresponding final Markdown
+  excerpt; and an explicit verification result (FR-084).
+- **FR-082** (source-context markers vs literal final-Markdown evidence): The
+  report MAY add **report-only** markers to the **source-context** representation
+  to indicate the disputed location — for example `Apartamento 42 | << R$ 1.599,80
+  >>`. Such markers are presentation aids only, are not part of any source literal,
+  and MUST NOT be confused with delivered content. In contrast, the **Final
+  Markdown evidence** shown for each item MUST be copied from the **actual
+  delivered Markdown artifact** — specifically from the text obtained by decoding
+  that artifact's exact bytes as UTF-8, which is also the text the location-aware
+  verification of FR-083 indexes into — and MUST reproduce the relevant excerpt
+  **literally as delivered** — preserving exact characters, exact punctuation,
+  decimal
+  separators, thousand separators, the spaces before / inside / after the reviewed
+  value, Unicode characters, Markdown syntax, and the line structure relevant to
+  the excerpt. The system MUST NOT alter the Final Markdown evidence for
+  readability; specifically it MUST NOT add `<< >>` highlighting, trim the excerpt,
+  apply an equivalent of `.strip()`, collapse whitespace, normalize Unicode,
+  normalize punctuation, rewrite decimal / thousand separators, insert or remove
+  spaces, or canonicalize equivalent-looking characters. If the delivered Markdown
+  literally contains `Apartamento 42 | R$ 1.599,80`, the report MUST show exactly
+  `Apartamento 42 | R$ 1.599,80` and MUST NOT transform it into `Apartamento 42 |
+  << R$ 1.599,80 >>`. The report MAY add headings or explanatory text **around**
+  the excerpt, but the captured excerpt itself MUST remain literal.
+- **FR-083** (location-aware verification): A human-review decision MUST NOT be
+  considered successfully applied merely because the human-confirmed string can be
+  found **somewhere** in the final Markdown — this matters especially where an
+  identical value occurs more than once. Verification MUST be tied to the reviewed
+  source segment and its authoritative processing lineage to the corresponding
+  rendered output location — conceptually: review item → source-backed segment →
+  human-confirmed resolution → reconciled / Canonical-Extracted-Document
+  representation → semantic / render lineage → the corresponding final-Markdown
+  span. Verification MUST distinguish an **unauthorized literal alteration** from a
+  **transformation explicitly permitted by this specification**: it MUST NOT
+  silently treat punctuation, spacing, Unicode, numeric-formatting, or other
+  literal differences as equivalent because they look similar, and any allowed
+  transformation that affects how the reviewed content appears in the final
+  Markdown MUST remain traceable and valid under the existing transformation rules
+  (FR-006–FR-022 / FR-064). The report MUST show what the delivered document
+  **actually** contains, even when an allowed structural transformation has occurred
+  around the reviewed content. The detailed lineage and Markdown-span data
+  structures belong to future data-model / contract work; this location-aware
+  verification **behaviour** is a product requirement.
+- **FR-084** (verification outcome and delivery gating): Each applicable
+  human-review decision MUST receive an explicit human-readable final-verification
+  status with semantics equivalent to **APPLIED AND VERIFIED** or **NOT APPLIED /
+  VERIFICATION FAILED** (exact wording may be refined during planning / contracts).
+  A run MUST NOT be considered **successfully delivered** if any applicable
+  human-review decision cannot be traced to and verified at its corresponding
+  location in the final Markdown. When verification fails: any Markdown produced
+  for that run MUST exist **only** as a run-scoped, non-deliverable intermediate
+  output and MUST NOT be written to — or left at — the name reserved for the
+  successfully delivered Markdown (`<output-base>.md`); successful delivery is
+  blocked; the failed human-review item is identified; the human-confirmed expected
+  decision is recorded in the Human Review Report; the actual corresponding
+  final-Markdown evidence is shown when available; and the failure enters the
+  existing final fidelity validation / audit workflow rather than being ignored,
+  **classified by the stage that introduced it** (FR-034a / FR-045a / FR-073):
+  `reconciliation_error` when the human-confirmed decision was not carried into the
+  reconciled / Canonical-Extracted-Document representation (routed back to the
+  human-review layer), or `disallowed_transformation` when that representation is
+  correct but a later deterministic transformation or rendering step altered or
+  dropped the reviewed content (routed to a code fix and re-verification, or to
+  `fix` followed by mandatory re-verification) — the verification step MUST NOT
+  collapse both causes into a single class. Publishing the successfully delivered
+  Markdown to `<output-base>.md` happens **only after** every delivery gate passes
+  (all items resolved, explicit authorization for the current run, built-in
+  fidelity self-check passed, and every applicable human-review decision
+  **APPLIED AND VERIFIED**). If a prior run already delivered `<output-base>.md`
+  and a later run changes a human-review decision, the later run MUST NOT overwrite
+  that delivered artifact: it is treated as an FR-054 name collision (the existing
+  file is preserved and the user is directed to a fresh output location).
+  Combined with FR-072 and FR-077, the delivery gate progresses conceptually as:
+  *unresolved review* →
+  blocked; *all resolved, not authorized* → awaiting explicit user authorization;
+  *authorized, processing underway* → processing; *rendered but review verification
+  failed* → delivery blocked; *every applicable review decision verified* →
+  eligible for successful delivery. These behavioural states need not use these
+  exact internal names if the system expresses run state differently.
 
 #### Page selection
 
@@ -942,7 +1245,7 @@ Canonical Extracted Document, the semantic document, and the final Markdown.*
 *`fix` operates only on post-transformation defects flagged by final fidelity
 validation. It is not the mechanism for unresolved extraction candidates or an
 unresolved source reading order — those go through the human-review workflow
-(FR-067–FR-074). See FR-073 and FR-045a.*
+(FR-067–FR-084). See FR-073 and FR-045a.*
 
 - **FR-039**: `fix` MUST take the original Markdown, the validation report, and
   source context as inputs.
@@ -991,13 +1294,15 @@ unresolved source reading order — those go through the human-review workflow
 - **FR-051**: `convert` MUST stop at the validation report and MUST NOT invoke
   `fix` automatically. If its `extract` stage raises HUMAN_REVIEW_REQUIRED items,
   `convert` MUST stop at the human-review queue (before `validate`) and deliver no
-  final Markdown or traceability record for that run; it resumes when the items are
-  resolved (FR-072).
+  final Markdown or traceability record for that run; it resumes only after the
+  items are resolved **and** downstream processing is explicitly authorized
+  through the `review` workflow (FR-072 / FR-077).
 - **FR-052**: The `convert` standard workflow MUST emit a traceability record that
   links the source PDF, selected physical page ranges, generated Markdown, removal
-  log, reconciliation log, any human-review queue, validation report, and DOCX
-  output when requested. Standalone `extract`, `validate`, `fix`, and `export`
-  operations MUST NOT emit a traceability record.
+  log, reconciliation log, any human-review queue, the Human Review Report when one
+  is produced (FR-080), validation report, and DOCX output when requested.
+  Standalone `extract`, `validate`, `fix`, and `export` operations MUST NOT emit a
+  traceability record.
 - **FR-053**: Generated files MUST use deterministic names derived from the
   original filename and the selected page ranges, so identical inputs yield
   identical names.
@@ -1019,7 +1324,14 @@ unresolved source reading order — those go through the human-review workflow
   user-configurable or otherwise output-affecting settings**, so it contributes
   nothing to the effective inputs or the `run_id`. If a future version introduces
   any output-affecting semantic-transformation configuration, that setting MUST
-  then be added to the effective inputs above and folded into run identity.
+  then be added to the effective inputs above and folded into run identity. The
+  precise canonical form of this effective-input tuple and of `run_id` is
+  maintained authoritatively in the technical design (research §14); this list and
+  every other artifact reference it rather than restating it. The Human Review
+  Report and its machine model (FR-080–FR-084) are part of the deterministic core;
+  the post-review processing authorization (FR-077) is a recorded human action,
+  never feeds `run_id`, and is **not** part of the run-twice deterministic-core
+  artifact set.
 - **FR-053b** (LLM-assisted audit results): The validation report's
   `check_origin: "semantic"` issues — and any future LLM-produced audit content —
   are reproducible **only to the extent the local LLM backend provides the
@@ -1056,12 +1368,17 @@ unresolved source reading order — those go through the human-review workflow
 - **FR-056**: Any optional network- or cloud-assisted behavior MUST be opt-in and
   disclosed before use.
 - **FR-057**: The validation report, removal log, correction log, traceability
-  record, reconciliation log, human-review queue, and human-review resolution
-  store MUST each be written as a structured machine-readable file that is the
-  authoritative source of truth (consumed programmatically by `fix`, by
-  human-review resolution and replay, and by tests), and the system MUST also
-  generate a human-readable Markdown rendering of each. The two MUST always
-  represent the same content.
+  record, reconciliation log, human-review queue, human-review resolution store,
+  the persisted run-context, the append-only human-review authorization event log,
+  and the human-review verification record MUST each be written as a structured
+  machine-readable file that is the authoritative source of truth (consumed
+  programmatically by `fix`, by human-review resolution and replay, and by tests),
+  and the system MUST also generate a human-readable Markdown rendering of each
+  (for the verification record, that rendering is the Human Review Report). The two
+  MUST always represent the same content. The **Human Review Report** (FR-080) is a
+  human-readable Markdown delivery artifact rendered from the verification record —
+  a verification aid, not itself one of the authoritative machine-readable stores —
+  and does not replace them.
 - **FR-057a**: The reconciliation log MUST record, per resolved conflict, whether
   it was a **literal-content** or a **reading-order** conflict, the competing
   candidates (values, or segment orderings) with their sources, the resolution
@@ -1124,21 +1441,42 @@ unresolved source reading order — those go through the human-review workflow
   applicable (FR-057a).
 - **HUMAN_REVIEW_REQUIRED item / human-review queue**: an explicit reconciliation
   state (FR-067) — a conflict whose automatic confidence is below the threshold.
-  Lifecycle: `open` → `resolved`. A literal-content item carries the FR-062a fields
+  Item lifecycle: `open` → `resolved`, and a `resolved` item remains reopenable and
+  re-decidable (FR-076). A literal-content item carries the FR-062a fields
   (page/line/column, bbox, each source's candidate value, reason, confidence); a
   reading-order item carries the FR-062d fields (page, affected regions/bboxes,
   candidate segment identifiers, candidate reading orders, contributing sources,
-  reason, confidence). While any item is `open` the run's final Markdown is blocked
-  (FR-072).
+  reason, confidence). It is presented to the reviewer with the FR-075 locating
+  context (section, table/row/column, source context before/after, per-candidate
+  provenance label). The workflow also tracks a **run-level** state (FR-077):
+  *items unresolved* / *all resolved but processing not authorized* / *processing
+  authorized*. While any item is `open` the run's **successful delivery** is blocked
+  (FR-072); an empty queue alone does not unblock it.
 - **Human-review resolution**: the persisted outcome of resolving one review item
   (FR-070) — source hash, page/region, conflict type, the candidate evidence
   presented, the selected candidate or human-entered literal value, the accepted
   segment ordering (reading-order), `decision_method = human_confirmed`, and a link
   to the originating review item. For a literal-content conflict where none of the
-  candidates was correct, it records a human-entered value flagged as manually
-  verified against the original PDF. Lives in the **human-review resolution store**
-  (FR-057b): durable across runs, append-only, keyed by a deterministic
-  applicability key (FR-071), never touched by an automatic stage or an LLM.
+  candidates was correct, it records a human-entered value captured **exactly as
+  typed** and flagged as manually verified against the original PDF (FR-068). It is
+  persisted immediately, before the workflow advances (FR-070). Lives in the
+  **human-review resolution store** (FR-057b): durable across runs, append-only,
+  keyed by a deterministic applicability key (FR-071), never touched by an automatic
+  stage or an LLM. A changed answer (FR-076) is a **new record**; the superseded
+  record is retained, and the store makes previous / replacement / currently-
+  applicable decisions and each decision's context recoverable.
+- **Human Review Report**: a human-readable Markdown delivery artifact
+  (`<output-base>_review_report.md`, FR-080–FR-084) delivered alongside the final
+  Markdown when a run has one or more applicable human-review decisions and
+  downstream processing was authorized. A verification aid, **not** an authoritative
+  audit store (that is the reconciliation log / resolution store, FR-057). Carries a
+  summary (source and final-Markdown identity; counts of decisions applicable,
+  resolved, verified, and failed; overall PASS/FAIL) and, per applicable decision,
+  the source location and context, the candidates, the human-confirmed value/order,
+  the corresponding final-Markdown excerpt **copied literally from the delivered
+  artifact**, and an explicit **APPLIED AND VERIFIED** / **NOT APPLIED —
+  VERIFICATION FAILED** status. Report-only `<< >>`-style markers MAY appear on the
+  *source-context* representation but never on the literal final-Markdown evidence.
 - **Region OCR record**: per page (and per region where OCR is applied region-wise)
   — whether OCR ran, the detected or overridden language(s), the effective
   confidence threshold, and low-confidence region count.
@@ -1273,14 +1611,18 @@ unresolved source reading order — those go through the human-review workflow
   Canonical Extracted Document still holds that text as literal content plus the
   hint as attributed evidence, and only the semantic transformation stage's
   recorded decision determines whether it becomes a heading — 100% of such cases.
-- **SC-027**: A run with at least one unresolved HUMAN_REVIEW_REQUIRED item never
-  delivers a final Markdown — 100% of such runs; the human-review queue and
-  intermediate artifacts MAY still be written.
-- **SC-028**: Once every required review item for a run is resolved, re-running
-  completes to a final Markdown that incorporates each resolution, with no
-  hand-editing of generated Markdown — 100% of such cases.
+- **SC-027**: A run with at least one unresolved HUMAN_REVIEW_REQUIRED item is never
+  presented as a successfully delivered final Markdown — 100% of such runs; the
+  human-review queue and intermediate artifacts MAY still be written.
+- **SC-028**: Once every required review item for a run is resolved **and** the
+  reviewer explicitly authorizes downstream processing (chooses "Continue
+  processing"), processing resumes and completes to a final Markdown that
+  incorporates each resolution, with no hand-editing of generated Markdown — 100% of
+  such cases. Answering the last review item alone never auto-resumes processing —
+  100% of cases the workflow instead presents the authorization choice (FR-077).
 - **SC-029**: A human-entered literal value (used only when no candidate was
-  correct) is recorded as `human_confirmed`, manually-verified provenance, and
+  correct) is stored exactly as typed (no normalization / re-spacing / separator
+  rewrite), recorded as `human_confirmed` with manually-verified provenance, and
   appears only via the human-review workflow — an automatic run of the same
   document without that resolution still raises the review item rather than
   inventing the value — 100% of such cases.
@@ -1291,13 +1633,65 @@ unresolved source reading order — those go through the human-review workflow
 - **SC-031**: When final fidelity validation flags a `reconciliation_error`, `fix`
   routes it back to the human-review layer and never patches it as a Markdown-only
   edit — 100% of such cases.
+- **SC-032**: Every confirmed human-review decision is persisted before the
+  workflow advances to the next item; after an interruption (Ctrl+C, voluntary
+  exit, terminal closure, process kill, machine restart) no already-resolved
+  applicable item is asked again and the workflow resumes at the next unresolved
+  applicable item — 100% of interruption cases in the test set (FR-070).
+- **SC-033**: When a reviewer reopens an earlier decision and records a different
+  answer, the prior decision remains recoverable from the audit history (previous,
+  replacement, and currently-applicable decision, plus each decision's context) and
+  the new decision re-propagates through reconciliation → CED → semantic
+  transformation → validation → render — never by editing the delivered Markdown —
+  100% of such cases (FR-076 / FR-079).
+- **SC-034**: When a run has at least one applicable human-review decision and
+  downstream processing is authorized, the delivery includes the Human Review
+  Report, and each per-item "Final Markdown" excerpt in the report is byte-for-byte
+  identical to the corresponding span of the delivered Markdown (no trim, `.strip()`,
+  whitespace collapse, Unicode/punctuation/separator normalization, or `<< >>`
+  highlighting) — 100% of such deliveries (FR-080 / FR-082).
+- **SC-035**: Human-review final verification is location-aware: for a fixture where
+  the human-confirmed value also occurs elsewhere in the Markdown, verification is
+  anchored to the reviewed segment's rendered span via its processing lineage, and a
+  spacing / punctuation / decimal- or thousand-separator / Unicode-only difference
+  at that span is reported as VERIFICATION FAILED rather than silently accepted —
+  100% of such fixtures (FR-083).
+- **SC-036**: A run in which any applicable human-review decision fails
+  location-aware verification is never presented as a successful delivery; no
+  Markdown for that run is written to the delivered-Markdown name; the failed item,
+  its human-confirmed expected decision, and the actual final-Markdown evidence
+  appear in the Human Review Report; and the failure enters the final fidelity
+  validation / audit workflow classified by its originating stage —
+  `reconciliation_error` (decision not carried into reconciliation / the CED) or
+  `disallowed_transformation` (CED correct, a later transform/render step broke it)
+  — 100% of such runs (FR-084).
 
 ## Assumptions
 
 - The primary interface is a command-line application. It exposes the five
   document-processing operations `extract`, `validate`, `fix`, `export`, and
   `convert`, plus a separate `review` operation for the human-review workflow
-  (FR-066a / FR-074); a graphical interface is out of scope for the first version.
+  (FR-066a). The `review` workflow is an **interactive, keyboard-driven terminal
+  mode** (FR-074). The specification does **not** require — and the design MUST NOT
+  introduce — a graphical desktop application, a browser-based UI, a local web
+  server, a desktop-application framework, an OS-specific native application, PDF
+  image previews or PNG crop generation for the review workflow, direct manual
+  editing of review-state files as the normal workflow, direct patching or
+  hand-editing of the final Markdown, automatic continuation immediately after the
+  final review answer, or LLM-generated correction of disputed literals. Any
+  graphical interface is out of scope for the first version.
+- The concrete terminal-interaction library, the human-review queue / resolution
+  store file formats, the review-item schema, the review-to-Markdown lineage
+  representation, and the Markdown-span representation used for location-aware
+  verification (FR-083) are planning / research / data-model / contract decisions.
+  This specification fixes the **behaviour** (interactive terminal, immediate
+  persistence, explicit authorization, literal Markdown evidence, location-aware
+  verification, Human Review Report), not the mechanism.
+- The Human Review Report (FR-080) is a **delivery artifact and verification aid**,
+  not an authoritative audit store; the authoritative records remain the
+  reconciliation log and the human-review resolution store (FR-057 / FR-057a /
+  FR-057b). Its exact section layout and file naming beyond `<output-base>_review_report.md`
+  are a planning / contract decision.
 - One source PDF is processed per invocation; batch processing of multiple PDFs is
   out of scope for the first version.
 - Physical PDF pages are indexed from 1.

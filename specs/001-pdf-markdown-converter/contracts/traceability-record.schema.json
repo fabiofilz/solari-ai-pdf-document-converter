@@ -1,18 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://solari.local/schemas/traceability-record-2.0.json",
+  "$id": "https://solari.local/schemas/traceability-record-2.1.json",
   "title": "TraceabilityRecord",
   "type": "object",
   "additionalProperties": false,
+  "description": "Written by `convert` ONLY for a run that reaches run_state == delivered (FR-051 / FR-072 / FR-077 / FR-084). A run that stopped at the queue, or is resolved_unauthorized, or ended delivery_blocked_verification_failed, emits no traceability record. v2.1 (audit remediation): `human_review_verification_summary` is REQUIRED (null when no applicable decision); `artifacts` may reference the `run_context` (H3) and the `review_authorizations` append-only event log (M2/M4, renamed from the singular `review_authorization`).",
   "required": [
     "record_type", "schema_version", "run_id", "tool_version",
     "source_pdf", "source_sha256", "page_selection",
     "operation", "physical_page_ranges", "artifacts",
-    "llm_used", "network_egress", "resolutions_applied"
+    "llm_used", "network_egress", "resolutions_applied", "human_review_verification_summary"
   ],
   "properties": {
     "record_type": { "const": "traceability_record" },
-    "schema_version": { "const": "2.0" },
+    "schema_version": { "const": "2.1" },
     "run_id": { "type": "string", "pattern": "^[a-f0-9]{16}$",
       "description": "Content-derived digest; no wall-clock time or randomness (FR-053a). A re-run on identical inputs re-emits this record byte-for-byte (SC-009)." },
     "tool_version": { "type": "string", "minLength": 1 },
@@ -46,22 +47,47 @@
         "original_markdown": { "$ref": "#/$defs/artifactRef" },
         "removal_log": { "$ref": "#/$defs/artifactRef" },
         "validation_report": { "$ref": "#/$defs/artifactRef" },
+        "run_context": { "$ref": "#/$defs/artifactRef",
+          "description": "<base>.run-context.json — the persisted extract-stage effective-input tuple that lets `review` recompute the current run_id (H3, research §14). Present for any run that produced it." },
         "human_review_queue": { "$ref": "#/$defs/artifactRef" },
+        "review_authorizations": { "$ref": "#/$defs/artifactRef",
+          "description": "<base>.review-authorizations.jsonl — the APPEND-ONLY authorization event log (M4). Present iff the run had >= 1 human-review item (FR-077). Authorization validity is `authorized_run_id == current run_id` only; there is no queue-file hash (M2)." },
+        "human_review_report": { "$ref": "#/$defs/artifactRef",
+          "description": "<base>_review_report.md — present iff the run had >= 1 APPLICABLE human-review decision (FR-080)." },
+        "human_review_verification": { "$ref": "#/$defs/artifactRef",
+          "description": "The authoritative machine model the report renders from (FR-083/FR-084) — present iff human_review_report is." },
         "docx": { "$ref": "#/$defs/artifactRef" }
       }
     },
     "resolutions_applied": {
       "type": "array",
-      "description": "human_confirmed resolutions replayed this run (FR-071); part of run_id.",
+      "description": "Currently-applicable human_confirmed decisions replayed this run (FR-071/FR-076); part of run_id.",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["applicability_key", "review_item_id"],
+        "required": ["applicability_key", "review_item_id", "resolution_id"],
         "properties": {
           "applicability_key": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-          "review_item_id": { "type": "string", "minLength": 1 }
+          "review_item_id": { "type": "string", "minLength": 1 },
+          "resolution_id": { "type": "string", "pattern": "^[a-f0-9]{16}$" }
         }
       }
+    },
+    "human_review_verification_summary": {
+      "oneOf": [
+        { "type": "null", "description": "The run had no applicable human-review decision." },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["applicable", "verified", "failed", "status"],
+          "description": "FR-084 summary of the location-aware verification (full detail is the linked artifacts.human_review_verification record). A delivered run always has status == 'PASS' (a FAIL blocks delivery, so no traceability record is written).",
+          "properties": {
+            "applicable": { "type": "integer", "minimum": 1 },
+            "verified": { "type": "integer", "minimum": 0 },
+            "failed": { "type": "integer", "minimum": 0 },
+            "status": { "enum": ["PASS", "FAIL"] }
+          }
+        }
+      ]
     },
     "llm_used": {
       "oneOf": [

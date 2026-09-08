@@ -1,6 +1,6 @@
 # Implementation Plan: Local-First PDF Document Converter
 
-**Branch**: `001-pdf-markdown-converter` | **Date**: 2026-09-07 | **Spec**: [spec.md](./spec.md)
+**Branch**: `001-pdf-markdown-converter` | **Date**: 2026-09-07 (Human Review evolution 2026-09-08) | **Spec**: [spec.md](./spec.md)
 
 **Input**: Feature specification from `/specs/001-pdf-markdown-converter/spec.md`
 **Constitution**: [`.specify/memory/constitution.md`](../../.specify/memory/constitution.md) **v2.0.0**
@@ -48,9 +48,17 @@ The pipeline has five ordered stages (FR-059):
 **Operations**: `extract` (stages 1–3 + a deterministic self-check + render; no LLM
 required), `validate` (full stage 4), `fix` (post-transformation Markdown
 corrections; routes `reconciliation_error` back to review), `export` (Markdown →
-DOCX), `convert` (extract → validate → optional export), and **`review`** (the
-human-review workflow: list / show / resolve queue items; resolutions append to the
-resolution store; `extract` / `convert` resume on the next run).
+DOCX), `convert` (extract → validate → optional export), and **`review`** — an
+**interactive, keyboard-driven terminal workflow** (FR-074, research §22): resolve
+queue items with Up/Down/Enter or "Enter another value…", each answer persisted
+immediately, browse/reopen/change earlier answers (append-only history), then an
+explicit **Continue processing / Save and exit** choice — resolving the last item
+never auto-continues. After authorization, decisions flow back through
+reconciliation → CED → transform → validate → render (never a Markdown patch), and
+every applicable decision is **location-aware-verified** against its rendered span;
+a delivered run also produces a **Human Review Report** (`<base>_review_report.md`).
+A non-interactive `review list/show/resolve/authorize/status` sub-interface exists
+for automation and tests.
 
 **Constitution v2.0.0 posture**: dependency count is **not** an objective. Docling
 and a neural OCR option are admitted because they materially improve extraction and
@@ -79,6 +87,7 @@ Constitution Check section for the per-dependency rationale. Summary:
 | `pydantic` v2 | MIT | All entity models; JSON (de)serialization; JSON Schema generation for contracts |
 | `httpx` | BSD | Local-LLM client (OpenAI-compatible) — used by **reconciliation** candidate-selection and by **validation** semantic pass |
 | CLI: stdlib `argparse` | — | Sufficient for six subcommands; the simplest tool that meets the requirement |
+| `questionary` (→ `prompt_toolkit` → `wcwidth`) — **proposed, deferred** | MIT / BSD | Interactive `review` terminal UI (FR-074); pure-Python, no network; added at the first `review` task, not T002 (see ledger + research §22.1) |
 | Dev: `pytest`, `reportlab`, `pytest-benchmark` (or a plain harness), `jiwer` (CER/WER for the OCR benchmark) | MIT/BSD | Fixtures, tests, OCR benchmark scoring |
 
 **Storage**: Filesystem only. Per-run artifacts → a user-specified output directory
@@ -166,10 +175,10 @@ document size within machine resources.
 |---|---|---|
 | **I. Content Fidelity** | PASS | Verbatim text always comes from a PDF text layer or local OCR (FR-029). The LLM never authors text — reconciliation is candidate-selection with a programmatic guard (FR-061a/b), validation is read-only (FR-037). Every accepted value traces to its contributing source(s) (FR-066). Multi-path extraction reduces the chance a single technique's error reaches the output. |
 | **II. Semantic Structure Preservation** | PASS | Structure is inferred only in stage 3, deterministically, on a reconciled pre-normalization CED; structural hints (incl. Docling's) are advisory and their use is recorded (FR-064). Reading order is a first-class reconciled decision (FR-061d), preserved unchanged downstream (FR-015). Checked by final fidelity validation (FR-065), not assumed. |
-| **III. Validation Before Delivery** | PASS | Stage 4 final fidelity validation runs on every path; `extract` includes a deterministic self-check and delivers Markdown only per the validation policy; `convert` always runs the full `validate`. Final Markdown is blocked while any review item is open (FR-072). |
-| **IV. Controlled, Auditable Correction (NON-NEGOTIABLE)** | PASS | Every reconciliation decision (deterministic / llm_selected / human_confirmed) is logged with its competing candidates and provenance (FR-057a). Human resolutions are append-only, keyed, replayable, never LLM-touched (FR-057b/FR-070/FR-071). `fix` changes only report-flagged regions, never patches a `reconciliation_error` (FR-045a). No heuristic rewriting. |
-| **V. Local-First & Data Privacy** | PASS (unchanged from v1.0.0) | Every stage runs on the user's machine, incl. Docling, OCR, and the LLM (local OpenAI-compatible endpoint). Autouse no-egress test. Models/data downloaded once from documented sources, never carrying document content (Constitution "Technology & Security Constraints", v2.0.0). |
-| **VI. Test-First (NON-NEGOTIABLE)** | PASS | `/speckit-tasks` will order contract tests (JSON Schemas + CLI contract) and per-user-story integration tests before implementation. The reconciliation guard, the human-review lifecycle, and the OCR benchmark all get failing tests first. |
+| **III. Validation Before Delivery** | PASS (**strengthened 2026-09-08**) | Stage 4 final fidelity validation runs on every path; `extract` includes a deterministic self-check and delivers Markdown only per the validation policy; `convert` always runs the full `validate`. Successful delivery is now blocked on **three** conditions: no open review item (FR-072), explicit downstream-processing authorization (FR-077), **and** every applicable human-review decision passing **location-aware final verification** at its rendered Markdown span (FR-083/FR-084). A verification failure enters the same `reconciliation_error` validation/audit path (FR-034a/FR-045a). |
+| **IV. Controlled, Auditable Correction (NON-NEGOTIABLE)** | PASS (**strengthened 2026-09-08**) | Every reconciliation decision (deterministic / llm_selected / human_confirmed) is logged with its competing candidates and provenance (FR-057a). Human resolutions are **append-only** — a changed answer is a new record with `supersedes`, the prior decision is never erased (FR-076); the full previous→replacement→currently-applicable chain is recoverable. No destructive update anywhere in the review workflow. Decisions are applied only by re-running the pipeline from the CED — **never** by editing the Markdown (FR-079). `fix` changes only report-flagged regions, never patches a `reconciliation_error` or a verification failure (FR-045a/FR-084). |
+| **V. Local-First & Data Privacy** | PASS (unchanged) | Every stage runs on the user's machine, incl. Docling, OCR, and the LLM (local OpenAI-compatible endpoint). The interactive `review` layer (`questionary` → `prompt_toolkit` → `wcwidth`, research §22.1) is **pure-Python terminal I/O with no network path**; the autouse no-egress test still holds and covers it. No model/data download. |
+| **VI. Test-First (NON-NEGOTIABLE)** | PASS | `/speckit-tasks` will order contract tests (JSON Schemas + CLI contract) and per-user-story integration tests before implementation. The reconciliation guard, the human-review lifecycle, the interactive-terminal flow (driven by scripted key sequences via `prompt_toolkit`'s pipe input / `questionary` injectable I/O, plus the non-interactive sub-interface), immediate-persistence/resume, append-only supersede, the authorization gate, the review→Markdown lineage, location-aware verification, and the OCR benchmark all get failing tests first. All review **logic** lives outside the prompt layer and is unit-testable directly. |
 | **VII. Simplicity & Justified Dependencies (v2.0.0)** | PASS | See the ledger below. Dependency count is not minimized; each component is justified against fidelity / validation / diagnosability / maintainability / operational cost / local-first. Heavier components (Docling, a neural OCR option) are admitted where they materially improve fidelity or replace fragile heuristics. Nothing gratuitous, duplicative, or unexplained. Exact-pinned versions; supply-chain checks retained. |
 
 ### Justified-Dependency Ledger (replaces the old "seven runtime dependencies" framing)
@@ -216,6 +225,13 @@ Format: **fidelity / validation / diagnosability / maintainability / operational
 - **`pydantic` v2** — one definition per entity; JSON round-trip; `model_json_schema()` generates the contract schemas (no hand-synced schemas → no drift). Rust core, fast.
 - **`httpx`** — thin OpenAI-compatible client for the local LLM; used by reconciliation and validation. *Rejected*: the `openai` SDK (adds transitive deps for request shaping we do in ~40 lines; no fidelity/diagnosability gain) and `llama-cpp-python` in-process (couples model-file management + a large native dep into this tool; "user runs their own server" is a cleaner **separation of concerns** and keeps the LLM swappable — an architecture argument, not a weight argument).
 - **stdlib `argparse`** — six subcommands with a handful of options; argparse is sufficient and adds nothing to install. *Rejected*: Typer/Click — no product-quality benefit here; the choice is "simplest sufficient tool", not "fewest deps".
+- **`questionary` — interactive `review` terminal UI (PROPOSED 2026-09-08; not yet in `pyproject.toml`)** —
+  *Fidelity / safety*: FR-074 makes `review` an interactive keyboard-driven terminal mode (Up/Down/Enter menus, exact-literal text entry, answer browsing). `questionary` provides exactly those primitives (`select`, `text`) on top of `prompt_toolkit`; the alternative is a hand-written raw-terminal key handler (`termios`/`tty`/`msvcrt` + ANSI) — fragile, hard-to-test custom code in a safety-critical workflow, which VII v2.0.0 says to avoid.
+  *Diagnosability / maintainability*: `prompt_toolkit` is one of the most widely deployed terminal libraries in Python (IPython, pgcli, ptpython); MIT/BSD; actively maintained.
+  *Operational cost*: transitive closure = `questionary` -> `prompt_toolkit` (3.0.x) -> `wcwidth`. Three pure-Python packages, no native build, no models, **no network**.
+  *Local-first*: no egress; the deterministic pipeline never imports it (`review/` only).
+  *Install timing*: like `docling` (T046), this is **not** added at T002 — it is declared and pinned at the first `review`-workflow implementation task, with the exact `questionary` / `prompt_toolkit` / `wcwidth` versions + a fresh 7-day-rule check recorded here at that point. Candidate today: `questionary==2.1.1` (2025-08-28), `prompt_toolkit==3.0.53` (2026-07-26), `wcwidth` (>= 7 days old at add-time) — all satisfy the 7-day rule and Python >= 3.12.
+  *Rejected alternatives*: `InquirerPy` (no release since 2022-06 — maintenance risk; extra `pfzy` dep); `prompt_toolkit` directly (would re-implement the select/list widgets `questionary` already provides); stdlib-only (fragile custom terminal handling).
 - **Transitive deps promoted to explicit direct declarations (2026-09-08)** — these are already in the resolved closure via the packages above; they are imported *directly* by project code, so they are now exact-pinned in `pyproject.toml` rather than left implicit (no version change, no resolution change — ownership only):
   - `numpy==2.5.2` — runtime; `RapidOcrEngine` converts the page image to an `ndarray` for PP-OCR. (Was previously only a `[tool.uv]` foundation constraint; now a direct `[project.dependencies]` pin and removed from `constraint-dependencies`.)
   - `pillow==12.3.0` — runtime; both OCR adapters open/normalise the page image (`PIL.Image`); also the fixture/corpus renderers.
@@ -227,15 +243,27 @@ Format: **fidelity / validation / diagnosability / maintainability / operational
 
 ### Post-Design re-check (after Phase 1)
 
-`data-model.md` and `contracts/` introduce **no new runtime dependency** beyond the
-ledger. New concepts (Extraction Candidate, Source-backed Segment, Aligned Segment
-Group, Canonical Extracted Document, Reconciliation Decision/Log, HUMAN_REVIEW_REQUIRED
-Item, Human Review Resolution / store, Run Identity) are in-house data structures.
-The reconciliation **programmatic guard** and the **append-only resolution store**
-make Principles I and IV machine-checkable (`sha256(run₁)==sha256(run₂)` for the
-deterministic core; "selected value ∈ candidate set" as a 100% test). Principle V is
-a regression-guarded property (no-egress autouse fixture + a test that model
-downloads are absent at run time).
+`data-model.md` and `contracts/` introduce **one proposed, deferred runtime
+dependency** (`questionary` for the interactive `review` UI — ledger above; added at
+the first `review` task with a fresh 7-day check, not at T002). Everything else is
+in-house data structures: Extraction Candidate, Source-backed Segment, Aligned
+Segment Group, Canonical Extracted Document, Reconciliation Decision/Log,
+HUMAN_REVIEW_REQUIRED Item, Human Review Resolution / store (now with
+`resolution_id` / `sequence_index` / `supersedes` — append-only supersede, no
+destructive update), **Human Review Authorization** (per-`run_id`, derived run
+state), **RenderMap** + **Human Review Verification** (the review→Markdown lineage
+and location-aware check), **Human Review Report** (a rendered artifact, not a
+store), and Run Identity. The reconciliation **programmatic guard**, the
+**append-only resolution store**, the **`run_id`-keyed authorization** (a delivery
+requires an authorization record whose `run_id` matches the delivered artifacts),
+and **location-aware verification** (per-segment render spans, never a global string
+search) make Principles I, III, and IV machine-checkable
+(`sha256(run₁)==sha256(run₂)` for the deterministic core — which now also covers the
+Human Review Report and verification record; "selected value ∈ candidate set" as a
+100% test; "delivered ⇒ authorized-for-this-`run_id` ∧ every applicable decision
+verified"). Principle V is a regression-guarded property (no-egress autouse fixture
+— which also covers `questionary`/`prompt_toolkit` — + a test that model downloads
+are absent at run time).
 
 **Reproducibility is now two-level (FR-053a deterministic core + FR-053b LLM-assisted
 results, spec clarification 2026-09-07, research §4a pt 5).** The deterministic core
@@ -249,6 +277,43 @@ regenerating — so a re-run still reproduces the bytes, by replay, with no coll
 This is honest without weakening any guard, the source-backed-content invariant, or
 the deterministic core. All seven principles still PASS; Complexity Tracking remains
 empty.
+
+**Human Review evolution re-check (2026-09-08, FR-074–FR-084 / SC-032–SC-036,
+research §22 / §25 / §26).** The interactive `review` terminal mode adds **one
+proposed, deferred** dependency (`questionary` → `prompt_toolkit` → `wcwidth`,
+pure-Python, no network, added at the first `review` task with a fresh 7-day check —
+ledger). Principles III and IV are **strengthened**, not weakened: successful
+delivery now additionally requires explicit `run_id`-keyed authorization (FR-077)
+and location-aware verification of every applicable decision at its rendered span
+(FR-083/FR-084); the resolution history is append-only with an explicit supersede
+link — no destructive update anywhere (FR-076); decisions are never applied by
+editing Markdown (FR-079). Principle V is unaffected — `questionary`/`prompt_toolkit`
+do no network I/O and the no-egress autouse guard covers them. Principle VI holds —
+the prompt layer is isolated in `review/tui.py`, all review logic and the
+verification/report code are headless and unit-testable, and scripted key sequences
+drive the TUI in integration tests. The Human Review Report and the
+`human-review-verification` record are **deterministic** and join the FR-053a core;
+the authorization event and report generation are outputs, not `run_id` inputs
+(research §14). New concepts are all in-house data structures. All seven principles
+still PASS; Complexity Tracking remains empty.
+
+**Adversarial-audit remediation re-check (2026-09-08, H1–H6 / M1–M11).** The
+remediation is architecture/contract-only — no new runtime dependency, no code, no
+`pyproject.toml` / `uv.lock` change. It **tightens** existing principles: the
+`RunContext` record (H3) removes an ambiguity in the FR-053a effective-input
+definition rather than adding a source of truth; the authorization file is
+reclassified as an append-only **audit event log** (M4) — validity is purely
+`authorized_run_id == current run_id` (M2), which is strictly simpler than the
+rejected `queue_sha256`; `sequence_index` becomes the single "currently-applicable"
+authority with fail-closed invariants I1–I6 (H6) — no heuristic; `segment_transforms`
+is a **closed enum** each traceable to a permitting FR (H1) — the opposite of an
+open normalizer; Markdown serialization is pinned exactly (M5); the deliverable
+name never holds unverified content (H2). Principle VII is satisfied — the closed
+enum and the explicit precedence table are the *simple* choice; no fragile in-house
+heuristic is introduced. All seven principles still PASS; Complexity Tracking
+remains empty. research §14 is now the **authoritative** effective-input
+definition; `spec.md`, `data-model.md`, and `contracts/*` reference it and do not
+restate it (L5).
 
 ### Concrete-identifier maintenance invariant
 
@@ -297,8 +362,11 @@ specs/001-pdf-markdown-converter/
 │   ├── extraction-candidate.schema.json    # (persisted intermediate)
 │   ├── canonical-extracted-document.schema.json
 │   ├── reconciliation-log.schema.json
-│   ├── human-review-queue.schema.json
-│   ├── human-review-resolution.schema.json # store record
+│   ├── run-context.schema.json                  # persisted extract-stage effective-input tuple → `review` recomputes run_id (H3; 2026-09-08)
+│   ├── human-review-queue.schema.json           # (+ required derived `run_state` with explicit precedence; shared candidateEvidence $def)
+│   ├── human-review-resolution.schema.json      # append-only store line (content-bound resolution_id; sequence_index authority I1–I6; supersedes = audit linkage)
+│   ├── human-review-authorization.schema.json   # APPEND-ONLY per-run_id authorization EVENT LOG (2026-09-08); validity = authorized_run_id == current run_id; no queue hash
+│   ├── human-review-verification.schema.json    # review→Markdown lineage + location-aware verification; segment_transforms closed enum; defect_class = originating stage; null spans for not_located; the Human Review Report renders from this (2026-09-08)
 │   ├── removal-log.schema.json
 │   ├── validation-report.schema.json
 │   ├── correction-log.schema.json
@@ -316,6 +384,8 @@ pyproject.toml                    # uv-managed; console script `solari-convert`;
 src/solari_converter/
 ├── __init__.py
 ├── cli.py                        # argparse: extract | validate | fix | export | convert | review
+│                                 #   `review` (no subcmd) → interactive review/tui.py;
+│                                 #   `review list|show|resolve|authorize|status` → non-interactive (automation/tests)
 ├── config.py                     # LLM base URL/model/decode + retries; OCR engine name + confidence
 │                                 #   threshold (default 70, normalized 0–100) + lang override;
 │                                 #   reconciliation confidence threshold (default 0.75);
@@ -323,7 +393,9 @@ src/solari_converter/
 ├── errors.py                     # exception classes + exit codes (see cli.md)
 ├── run_identity.py               # deterministic run_id = sha256(source_sha256 ⧺ normalized_selection ⧺
 │                                 #   tool_version ⧺ canonical_json(output_affecting_config) ⧺
-│                                 #   digest(applicable_resolutions)) [:16]  (FR-053a/FR-071)
+│                                 #   applicable_resolution_digest) [:16]  (FR-053a/FR-071; research §14 AUTHORITATIVE).
+│                                 #   Also reads/writes RunContext (<base>.run-context.json) so `review`
+│                                 #   recomputes the CURRENT run_id after the store changes without re-prompting OCR flags (H3)
 ├── naming.py                     # deterministic artifact names from source stem + page-range token
 ├── artifacts_io.py               # atomic write; collision policy (identical bytes → no-op);
 │                                 #   dual emit JSON (source of truth) + Markdown rendering (FR-057)
@@ -366,13 +438,33 @@ src/solari_converter/
 │   ├── guard.py                  # programmatic guard: selected value byte-identical to a candidate /
 │   │                             #   ordering equals a candidate or geometry-supported order; else reject
 │   ├── confidence.py             # material-disagreement metric + confidence score (per sub-process)
-│   ├── resolutions.py            # applicability key; resolution-store read/append; replay
-│   ├── human_review.py           # raise HUMAN_REVIEW_REQUIRED items; queue read/write; item lifecycle
+│   ├── resolutions.py            # applicability key; append-only store read/append (resolution_id,
+│   │                             #   sequence_index, supersedes); "currently-applicable = last per key"; replay
+│   ├── human_review.py           # raise HUMAN_REVIEW_REQUIRED items (+ FR-075 presentation fields);
+│   │                             #   queue read/write; status re-derived from the store on load
 │   ├── log.py                    # ReconciliationLog assembly
 │   └── canonical_build.py        # assemble CanonicalExtractedDocument from accepted decisions
 │
+├── review/                       # interactive Human Review workflow (FR-074–FR-084) — the ONLY
+│   │                             #   package that imports `questionary`; NO import of transform/render/llm
+│   ├── tui.py                    # questionary select/text loops: resolve, "Enter another value…",
+│   │                             #   browse answers, reopen & change; post-review Continue/Save-and-exit
+│   ├── session.py                # derived run_state (explicit precedence, M11); APPEND to the
+│   │                             #   review-authorizations.jsonl EVENT LOG (validity = authorized_run_id ==
+│   │                             #   current run_id, M2/M4); reload RunContext + recompute current run_id (H3);
+│   │                             #   fail-closed resolution-store loader (I1–I6, H6); resume at next unresolved item
+│   ├── verify.py                 # location-aware verification: ReviewRenderLineage from RenderMap +
+│   │                             #   CED decisions; re-apply the closed-enum segment_transforms chain ONLY (H1);
+│   │                             #   follow collapsed_into edges (M7); codepoint-span excerpt (verbatim), null for
+│   │                             #   not_located (H4); APPLIED_AND_VERIFIED / VERIFICATION_FAILED + defect_class
+│   │                             #   = originating stage (H5); reading-order first-span monotonicity (M8)
+│   └── report.py                 # render human-review-verification.json → <base>_review_report.md
+│                                 #   (literal final-Markdown excerpt; report-only markers on source only)
+│
 ├── transform/                   # STAGE 3 — deterministic semantic transformation (NO LLM)
-│   ├── reflow.py                 # de-wrap; de-hyphenate (keep compound hyphens)
+│   ├── reflow.py                 # de-wrap; de-hyphenate (keep compound hyphens); records the stage-3
+│   │                             #   `segment_transforms` entries (dehyphenate / reflow_whitespace, each with
+│   │                             #   its permitting FR) on the RenderMap for FR-083 verification (H1)
 │   ├── structure.py              # heading/hierarchy inference (may consult structural hints; records use)
 │   ├── lists.py                  # list + numbered-article/clause reconstruction
 │   ├── tables.py                 # per-page table build; multi-page stitch; repeated-header collapse;
@@ -383,7 +475,9 @@ src/solari_converter/
 │
 ├── render/
 │   ├── markdown.py               # SemanticDocument → UTF-8 Markdown; `#`×level 1–6; deep-level [L{n}];
-│   │                             #   pipe vs HTML <table> (rowspan/colspan); OCR-derived marker
+│   │                             #   pipe vs HTML <table> (rowspan/colspan); OCR-derived marker.
+│   │                             #   ALSO emits a RenderMap: codepoint spans per block + per segment_id
+│   │                             #   (research §25.2) — the input to review/verify.py
 │   └── docx.py                   # Markdown → DOCX; Heading 1..9; list styles; merged cells;
 │                                 #   fixed core created/modified + normalized zip timestamps (FR-053a)
 │
@@ -414,20 +508,27 @@ src/solari_converter/
 │   ├── reconciliation_log.py
 │   ├── human_review_queue.py
 │   ├── human_review_resolution.py
+│   ├── human_review_authorization.py
+│   ├── human_review_verification.py   # + the Human Review Report Markdown renderer
 │   ├── validation_report.py
 │   ├── correction_log.py
 │   └── traceability.py
 │
 ├── pipeline/                    # thin use-case orchestration
-│   ├── extract.py               # stages 1→2→3 → self-check → render; OR stop at human-review queue
+│   ├── extract.py               # stages 1→2→3 → self-check → render(+RenderMap) → §25 verification;
+│   │                            #   stop at queue (unresolved), or at resolved_unauthorized,
+│   │                            #   or at delivery_blocked_verification_failed (all exit 6)
 │   ├── validate.py              # stage 4 against a produced Markdown
-│   ├── fix.py                   # correction sequence + re-validate
+│   ├── fix.py                   # correction sequence + re-validate; routes reconciliation_error
+│   │                            #   (incl. verification failures) back to review/
 │   ├── export.py                # Markdown → DOCX
-│   └── review.py                # list / show / resolve queue items; append to resolution store
+│   └── review.py                # workflow CORE (no questionary import): queue/store/authorization
+│                                #   orchestration used by review/tui.py AND the non-interactive
+│                                #   `review list/show/resolve/authorize/status` sub-interface
 │
 ├── workflow/
-│   └── convert.py               # extract → validate → optional export; stop at queue or report;
-│                                #   TraceabilityRecord written last
+│   └── convert.py               # extract → validate → optional export; stop at queue / unauthorized /
+│                                #   verification-failed; TraceabilityRecord written last, ONLY when delivered
 │
 └── pdf/
     └── loader.py                # open PDF once; reject encrypted / corrupted; 1-based physical pages;
@@ -450,10 +551,18 @@ tests/
 ├── fixtures/build_fixtures.py   # reportlab synthetic PDFs (see Testing strategy)
 ├── contract/                    # JSON-Schema conformance per record + CLI contract
 ├── integration/                 # one module per user story + reconciliation + human-review + resume
-├── unit/                        # align, literal, reading_order, guard, confidence, resolutions,
-│                                #   run_identity, naming, reflow, tables, structure, page_selection
+├── unit/                        # align, literal, reading_order, guard, confidence, resolutions
+│                                #   (append-only supersede; fail-closed I1–I6 loader), run_identity
+│                                #   (+ RunContext round-trip), naming, reflow (+segment_transforms),
+│                                #   tables, structure, page_selection, review/session (run_state precedence +
+│                                #   authorization-event-log derivation), review/verify (location-aware,
+│                                #   segment_transforms replay, defect_class, not_located nullability),
+│                                #   review/report (deterministic render)
+├── integration/…review_tui      # scripted key sequences via prompt_toolkit pipe input; parity vs the
+│                                #   non-interactive sub-interface; interruption/resume; reopen & change
 └── acceptance/                  # -m acceptance: corpus scoring (SC-002/003), reproducibility corpus,
-                                 #   the real long-form sample, the OCR benchmark smoke
+                                 #   the real long-form sample, the OCR benchmark smoke,
+                                 #   Human Review verified-delivery + verification-failure fixtures
 ```
 
 **Structure decision**: Single project, `src/` layout. Stage boundaries are package
@@ -465,6 +574,10 @@ runner is the only place they meet, and only as a list of independent candidates
 LLM access is one shared `validate/llm_client.py` used by `reconcile/llm_select.py`
 and `validate/semantic.py` — both analysis-only. `transform/`, `render/docx.py`, and
 `pipeline/export.py` have **no import path to `llm_client`** (enforced by test).
+The interactive-terminal dependency (`questionary`) is imported **only** by
+`review/tui.py`; `review/session.py` / `verify.py` / `report.py`, `pipeline/review.py`,
+and the deterministic pipeline never import it (import-graph test), so review
+*logic* stays headless-testable and the pipeline stays UI-free.
 
 ## Phase 0 — Research (output: `research.md`)
 
@@ -490,8 +603,10 @@ v2.0.0. Decisions to (re)make, in `research.md`:
 15. **Reconciliation design** — candidate representation; segment identity; cross-path alignment; literal- and reading-order-conflict detection; "deterministic geometric/layout evidence"; "material disagreement"; confidence computation; the programmatic guard; decision-log shape; the three decision paths.
 16. **Camelot / tabula** — revisit the weight-based rejection; retain or reject on measurable multi-page-table fidelity benefit vs `pdfplumber` + the `transform/tables.py` stitcher.
 17. **DOCX** — keep the `pandoc` rejection on merged-cell/structural fidelity grounds (not binary size).
-18. **Human-review workflow design** — CLI shape for `review`; queue & resolution representations; append-only store; applicability key; replay & resume semantics; exit codes; how `fix` routes `reconciliation_error` back.
-19. **Intermediate-artifact persistence** — which of {extraction candidates, CED, reconciliation log, structural hints, human-review queue, resolution store, semantic document, validation report, correction log, traceability record} are persisted vs ephemeral, and why (auditability / replay / diagnosis / reproducibility without duplicate sources-of-truth).
+18. **Human-review workflow design** — **(rewritten 2026-09-08, research §22)** the interactive keyboard-driven terminal mode (`questionary` selected; terminal-library evaluation; deferred pin); immediate per-answer persistence + resume; append-only supersede (`resolution_id` / `sequence_index` / `supersedes`, no destructive update); derived `run_state` + `run_id`-keyed authorization record (FR-077); the non-interactive `review list/show/resolve/authorize/status` sub-interface as an explicitly secondary automation surface; exit codes; how `fix` routes `reconciliation_error` (incl. verification failures) back.
+18a. **Review → final-Markdown lineage & location-aware verification** — **(new 2026-09-08, research §25; audit-remediated H1/H2/H4/H5/M5/M7/M8)** the `RenderMap` (per-block + per-segment codepoint spans, **possibly multiple per segment** M11); the **closed-enum ordered `segment_transforms`** chain per segment, each traceable to a permitting FR (H1, replaces `segment_edits`); `collapsed_into` edges for legitimate collapse (M7); the `ReviewRenderLineage` chain; the pinned Markdown serialization + codepoint-offset span locator (M5); the literal-excerpt rule with **null spans/excerpt for `not_located`** (FR-082, H4); the `HumanReviewVerification` model + `failure_reason` × **`defect_class` = originating stage** (H5); reading-order first-span monotonicity (M8); integration into the validation path classed by originating stage (FR-084); the deliverable name never holds unverified Markdown (H2, §25.7).
+18b. **Human Review Report** — **(new 2026-09-08, research §26)** a rendered `<base>_review_report.md` from the authoritative `human-review-verification.json`; naming; generation stage (post-render, post-verification, authorized + ≥1 applicable decision); summary + per-item content; PASS/FAIL derivation; deterministic (joins the FR-053a core); relationship to the traceability record.
+19. **Intermediate-artifact persistence** — which of {run context, extraction candidates, CED, reconciliation log, structural hints, human-review queue, resolution store, review-authorization event log, human-review-verification, render map, semantic document, validation report, correction log, traceability record, Human Review Report} are persisted vs ephemeral, and why (auditability / replay / diagnosis / reproducibility without duplicate sources-of-truth).
 
 **Output**: `research.md` with Decision / Rationale / Alternatives for each, and an
 explicit "unresolved — needs benchmark evidence" list.
@@ -509,8 +624,13 @@ Retire SFIR. Model, at minimum:
 - **Aligned Segment Group** — the cross-candidate correspondence unit (which candidates' segments are "the same region").
 - **Reconciliation Decision** — `{conflict_type: literal|reading_order, group/scope, candidates[], method: deterministic_agreement|llm_selected|human_confirmed, selected, confidence?, resolution_ref?}`.
 - **Canonical Extracted Document** — accepted segments (literal + provenance + decision), **AcceptedReadingOrder**, carried structural hints, per-value decision provenance. Pre-normalization. **Persisted as JSON only** — no `.md` companion (M1); the reconciliation log's `.md` is the human-facing diagnostic. Same for **Extraction Candidate**.
-- **HUMAN_REVIEW_REQUIRED Item** — literal (FR-062a fields) or reading-order (FR-062d fields); `open|resolved`.
-- **Human Review Resolution** (store record) — FR-070 fields + `decision_method=human_confirmed` + applicability key + append-only.
+- **HUMAN_REVIEW_REQUIRED Item** — literal (FR-062a fields) or reading-order (FR-062d fields); `open|resolved` (a `resolved` item stays reopenable, FR-076); **+ FR-075 presentation fields** (`structural_context`, `source_context_before/after`, per-candidate `provenance_label`, `segment_refs`); the queue also carries the derived `run_state`.
+- **Human Review Resolution** (append-only store line) — FR-070 fields + `decision_method=human_confirmed` + applicability key + **`resolution_id` / `sequence_index` / `supersedes`** (FR-076: a changed answer is a new line, prior retained; currently-applicable = last per key); entered value stored **verbatim** (FR-068/FR-082).
+- **Run Context** (`run-context.schema.json`) — the persisted extract-stage `output_affecting_config` tuple (research §14) so `review` recomputes the CURRENT `run_id` after the store changes without re-prompting OCR/reconcile flags (H3).
+- **Human Review Authorization** (append-only **event log** `<base>.review-authorizations.jsonl`) — `{envelope, authorized_run_id, applicable_resolution_digest, resolved_item_ids, authorized_via}` (FR-077, M4); validity is **exactly `authorized_run_id == current run_id`** (M2 — no `queue_sha256`); changing a decision → new `run_id` → no event matches → `resolved_unauthorized`; re-authorizing an unchanged set is an idempotent no-op append. **Not** in the FR-053a run-twice deterministic-core set (it is a human action).
+- **RenderMap** (stage-5) — per-block + per-`segment_id` codepoint spans in the delivered Markdown (possibly multiple per segment, M11); `collapsed_into` edges (M7); the closed-enum ordered `segment_transforms` chain per segment (H1) — the input to location-aware verification (FR-083).
+- **Human Review Verification** (`human-review-verification.schema.json`, v2.1) — per applicable decision: the review→Markdown lineage (with `segment_transforms`, `ced_accepted`), the codepoint `render_span`, the **literal** `final_markdown_excerpt` (**null for `not_located`**, H4), `status ∈ {applied_and_verified, verification_failed}` + `failure_reason` × **`defect_class` = originating stage** (H5); a summary with `PASS/FAIL`. The **authoritative machine model** the Human Review Report renders from; deterministic — the verification record + Report **join** the FR-053a core.
+- **Human Review Report** — the rendered `<base>_review_report.md`; a verification aid, **not** a store (FR-080); no state not derivable from the above + the delivered Markdown.
 - **Region OCR Record** — FR-025/FR-027a.
 - **Semantic Document** — Block union with per-block provenance + which structural hints were applied.
 - **Validation Issue / Report** — six mandatory fields + defect class + optional block + gross-divergence summary + `llm{model, decode, attempts, reproducibility: "deterministic"|"best_effort"}` (FR-053b) + `compared_against`.
@@ -520,12 +640,12 @@ Include a validation-rule cross-reference table (rule → FR/SC → enforced-in)
 
 ### `contracts/` (rewrite)
 
-- **`cli.md`** — six commands. `extract` / `validate` / `fix` / `export` / `convert` (updated stop conditions), and **`review`** (list / show `<id>` / resolve `<id>` --select N | --value TEXT | --order ID,ID,…). Global options: `--pages`, `--output-dir`, `--json`, OCR options on extract/validate/fix/convert, `--reconcile-confidence-threshold` (default 0.75), `--gross-divergence-threshold`, `--llm-*`, `--ocr-engine`, `--resolution-store PATH`. Exit-code table incl. a code for "human review required / run incomplete" and "OCR engine unavailable".
-- **JSON Schemas** (generated from pydantic; committed; drift test): extraction-candidate, canonical-extracted-document, reconciliation-log, human-review-queue, human-review-resolution, removal-log, validation-report (defect class, `compared_against`, `llm.decode`/`attempts`/**`reproducibility`** (FR-053b), gross-divergence fields), correction-log, traceability-record (reconciliation log + candidates + CED links, **`llm_used.reproducibility`**, drops `generated_at`, `run_id` pattern, `resolutions_applied`).
+- **`cli.md`** — six commands. `extract` / `validate` / `fix` / `export` / `convert` (updated stop conditions), and **`review`** — **interactive keyboard-driven terminal mode** as the normal path (Up/Down/Enter, "Enter another value…", browse/reopen/change, then Review answers / Continue processing / Save and exit; all-resolved-but-not-authorized re-entry), plus a non-interactive `review list | show <id> | resolve <id> (--select N | --value TEXT | --value-file P | --order ID,…) | authorize | status` sub-interface for automation/tests. Global options unchanged: `--pages`, `--output-dir`, `--json`, OCR options, `--reconcile-confidence-threshold` (0.75), `--gross-divergence-threshold`, `--llm-*`, `--ocr-engine`, `--resolution-store PATH`. Exit-code table unchanged: exit **6** now also covers `resolved_unauthorized` and `delivery_blocked_verification_failed` (distinguished by `run_state` in the message and `--json`), no new code.
+- **JSON Schemas** (generated from pydantic; committed; drift test): extraction-candidate, canonical-extracted-document, reconciliation-log, **run-context** (new — extract-stage effective-input tuple, H3), human-review-queue (**+ FR-075 presentation fields, required derived `run_state` with explicit precedence M11**), human-review-resolution (**content-bound `resolution_id` M1; `sequence_index` authority I1–I6 H6; `supersedes` = audit linkage; entered value verbatim**), **human-review-authorization** (new — append-only per-`run_id` authorization **event log** M4; validity = `authorized_run_id == current run_id` M2; no `queue_sha256`), **human-review-verification** (new — lineage + closed-enum `segment_transforms` H1 + `collapsed_into` M7 + `defect_class` originating-stage H5 + null spans for `not_located` H4 + per-decision status + summary; the Human Review Report renders from this), removal-log, validation-report (defect class **stage-based for verification failures H5**, `compared_against`, `llm.decode`/`attempts`/`reproducibility` (FR-053b), gross-divergence fields, **`issues[].review_item_id`** for verification failures), correction-log, traceability-record (reconciliation log + candidates + CED links, `llm_used.reproducibility`, drops `generated_at`, `run_id` pattern, `resolutions_applied` **+ `resolution_id`**, **`run_context` / `human_review_report` / `human_review_verification` / `review_authorizations` (plural — event log) artifact refs + a required `human_review_verification` summary**). Schemas whose 2026-09-08 change added a required field are **`schema_version` "2.1"** (resolution, queue, verification, authorization, traceability); the rest stay "2.0".
 
 ### `quickstart.md` (rewrite)
 
-Runnable scenarios: extract (paths agree); extract with a forced literal disagreement → human review → `review resolve` → re-run completes; reading-order conflict → geometry-resolved vs human-review; replayed resolution vs changed-context; OCR image page; hybrid page; `validate` defect classes; `fix` routing a `reconciliation_error`; `convert` traceability + no-egress + reproducibility; the OCR benchmark smoke run.
+Runnable scenarios: extract (paths agree); extract with a forced literal disagreement → human review → `review resolve` (or `review resolve --value-file` for a whitespace/newline-sensitive literal) → **explicit "Continue processing" authorization** → the pipeline renders to `intermediates/<base>.<run_id>.unverified.md`, runs the built-in self-check + location-aware verification, and only then publishes `<base>.md`; reading-order conflict → geometry-resolved vs human-review; replayed resolution vs changed-context; OCR image page; hybrid page; `validate` defect classes; `fix` routing a `reconciliation_error` (and a `disallowed_transformation` verification failure to a code fix + re-verification); `convert` traceability + no-egress + reproducibility; the OCR benchmark smoke run.
 
 ### OCR benchmark (Phase 1 deliverable spec; run is a task, not this plan)
 
@@ -542,15 +662,42 @@ a default OCR engine.**
 
 Fixtures / tests for: extractors agree; literal disagreement ≥ 0.75 (LLM selects);
 literal disagreement < 0.75 (review); all extractors wrong → human-entered source
-truth; reading-order disagreement resolved geometrically; resolved by LLM; requiring
-human review; LLM returns a non-candidate value (guard rejects); LLM returns an
-unsupported reading order (guard rejects); replayed human resolution; changed context
-invalidates replay; OCR-required image page; hybrid PDF; multi-page tables; Docling
-structural hint accepted / rejected later; seeded reconciliation error caught by
-final validation; seeded semantic-transformation error caught by final validation;
-unresolved review blocks final delivery; run-twice byte-equality; no-egress; no
-model download at run time; import-graph (no cross-path deps; no LLM import in
-`transform`/`export`).
+truth (stored verbatim, no normalization); reading-order disagreement resolved
+geometrically; resolved by LLM; requiring human review; LLM returns a non-candidate
+value (guard rejects); LLM returns an unsupported reading order (guard rejects);
+replayed human resolution; changed context invalidates replay; OCR-required image
+page; hybrid PDF; multi-page tables; Docling structural hint accepted / rejected
+later; seeded reconciliation error caught by final validation; seeded
+semantic-transformation error caught by final validation; unresolved review blocks
+final delivery; run-twice byte-equality; no-egress; no model download at run time;
+import-graph (no cross-path deps; no LLM import in `transform`/`export`; **no
+`questionary` import outside `review/tui.py`**).
+
+**Interactive Human Review (FR-074–FR-084 / SC-032–SC-036)** — failing-first tests
+for: keyboard navigation + candidate select + "Enter another value…" (scripted key
+sequences via `prompt_toolkit` pipe input); **immediate persistence** — kill the
+process after N confirmations, reopen, assert those N are `resolved` and not
+re-asked, resume at N+1 (SC-032); **append-only supersede** — reopen a resolved item,
+change it, assert the prior `resolution_id` is retained and the chain
+previous→replacement→currently-applicable is recoverable (SC-033); **authorization
+gate** — answering the last item does not auto-continue; only "Continue processing"
+writes the `review-authorization` record; reopening `resolved_unauthorized` offers
+the 3-way choice; **changed answer after authorization** — new `run_id`, prior
+authorization no longer matches, re-authorization required, no delivery on the stale
+set (FR-077); **decisions flow through the pipeline** — resolution changes the CED
+decision and re-renders; no Markdown-editing code path exists in `review/`;
+**location-aware verification** — duplicate identical literal elsewhere in the
+Markdown; spacing/separator/Unicode-only difference at the reviewed span →
+`verification_failed / literal_altered`; allowed structural transformation around an
+intact literal → verified; reading-order not reflected → `order_not_reflected`;
+`not_located` (SC-035); **literal evidence** — `final_markdown_excerpt` byte-identical
+to `delivered_markdown[start:end]`, no strip/normalize/`<< >>` (SC-034); **Human
+Review Report** — generated only when authorized + ≥1 applicable decision; summary
+counts + PASS/FAIL; deterministic (run-twice byte-equality); **verification failure**
+→ `reconciliation_error` issue with `review_item_id`, run not delivered, `fix`
+routes it back (SC-036); non-interactive sub-interface enforces the same safety
+rules; the interactive TUI and the headless core produce identical persisted
+records for the same decisions.
 
 ## Complexity Tracking
 
