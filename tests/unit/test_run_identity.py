@@ -119,11 +119,7 @@ def test_canonical_json_is_sorted_and_compact() -> None:
     assert run_identity.canonical_json({"b": 1, "a": 2}) == '{"a":2,"b":1}'
 
 
-def test_applicable_resolution_digest_is_order_independent_over_the_set() -> None:
-    r1 = ("k1" * 32, {"mode": "select", "value": "x"})
-    r2 = ("k2" * 32, {"order": ["s1", "s2"]})
-    a = run_identity.applicable_resolution_digest([r1, r2])
-    b = run_identity.applicable_resolution_digest([r2, r1])
-    assert a == b
-    assert a != run_identity.applicable_resolution_digest([r1])
-    assert run_identity.applicable_resolution_digest([]) == _EMPTY_DIGEST
+def test_module_does_not_own_the_applicable_resolution_digest() -> None:
+    # Digest ownership is the resolution store (reconcile.resolutions — T030); run_identity
+    # only folds the string. Coverage of the digest itself lives in test_resolution_store.py.
+    assert not hasattr(run_identity, "applicable_resolution_digest")

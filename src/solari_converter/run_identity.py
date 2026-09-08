@@ -15,9 +15,10 @@ no randomness (FR-053a). ``spec.md`` FR-053a, ``data-model.md`` (common envelope
 
 ``output_affecting_config`` is supplied by the caller already reduced to the correct
 research-§14 scope (extract-stage vs validate-stage) — see ``config.output_affecting_config``
-(T017). This function is agnostic to *which* keys it contains; it only canonicalises and
-folds. Timeouts, ``base_url``, output dir, ``--resolution-store``, ``--json`` and the
-review-UI path are never passed here.
+(T017). ``applicable_resolution_digest`` is supplied by the caller too — it is **owned by
+the resolution store** (``reconcile.resolutions.applicable_resolution_digest`` — T030);
+this module only *folds* the string. Timeouts, ``base_url``, output dir, ``--resolution-store``,
+``--json`` and the review-UI path are never passed here.
 
 The ``RunContext``-based recomputation of the *current* ``run_id`` after the resolution
 store changes is **T137 (Phase 4F)** — not this module.
@@ -27,10 +28,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
-__all__ = ["canonical_json", "applicable_resolution_digest", "compute_run_id"]
+__all__ = ["canonical_json", "compute_run_id"]
 
 _RUN_ID_LEN = 16
 
@@ -42,20 +43,6 @@ def canonical_json(obj: Any) -> str:
     (run_id, applicability key, resolution_id — research §14 / §22 / §22.2).
     """
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-
-def applicable_resolution_digest(
-    resolutions: Iterable[tuple[str, Mapping[str, Any]]],
-) -> str:
-    """``sha256`` over the sorted ``f"{applicability_key}={canonical_json(selected)}"``
-    lines of the **currently-applicable** resolution set replayed for a run
-    (data-model.md ``RunIdentity`` / research §14). Order-independent over the set; an
-    empty set yields ``sha256(b"").hexdigest()``.
-    """
-    parts = sorted(
-        f"{key}={canonical_json(selected)}" for key, selected in resolutions
-    )
-    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
 
 def compute_run_id(

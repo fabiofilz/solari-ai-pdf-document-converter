@@ -46,3 +46,14 @@ def test_artifact_names_are_deterministic() -> None:
     a = naming.artifact_name("agreement", sel, kind="base")
     b = naming.artifact_name("agreement", sel, kind="base")
     assert a == b == "agreement__p2_5-7"
+
+
+def test_run_scoped_intermediate_name_is_distinct_from_the_deliverable() -> None:
+    # T014 spec: intermediates/<base>.<run_id>.unverified.md != <base>.md
+    naming = _naming()
+    sel = PageSelection.whole_document()
+    deliverable = naming.artifact_name("agreement", sel, kind="markdown")
+    staged = naming.artifact_name("agreement", sel, kind="unverified_markdown", run_id="a" * 16)
+    assert deliverable == "agreement.md"
+    assert staged == "intermediates/agreement.aaaaaaaaaaaaaaaa.unverified.md"
+    assert staged != deliverable

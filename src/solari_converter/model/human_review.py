@@ -34,6 +34,7 @@ __all__ = [
     "HumanReviewQueue",
     "HumanReviewResolution",
     "compute_resolution_id",
+    "canonical_selected",
     "RUN_STATES",
 ]
 
@@ -135,7 +136,7 @@ class HumanReviewQueue(BaseModel):
 # --- resolution ------------------------------------------------------------------
 
 
-def _canonical_selected(selected: dict[str, Any]) -> dict[str, Any]:
+def canonical_selected(selected: dict[str, Any]) -> dict[str, Any]:
     """The normalised decision payload the ``resolution_id`` digest is taken over
     (research §22.2): ``{mode, value}`` for a literal decision, ``{order}`` for a
     reading-order decision. Provenance fields (``from_technique`` / ``manually_verified``)
@@ -153,7 +154,7 @@ def compute_resolution_id(
     payload = {
         "applicability_key": applicability_key,
         "sequence_index": sequence_index,
-        "selected": _canonical_selected(selected),
+        "selected": canonical_selected(selected),
     }
     return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()[:16]
 
