@@ -283,13 +283,23 @@ reconciliation log, not just the prior stage).
 | `source_page` | ✓ | int ≥ 1 |
 | `markdown_line` | ✓ | int ≥ 1 |
 | `markdown_column` | ✓ | int ≥ 1 |
-| `issue_type` | ✓ | enum `missing_content` \| `extra_content` \| `numeric_mismatch` \| `structure_mismatch` \| `heading_level` \| `table_shape` \| `duplicated_header` \| `reading_order` \| `unprovenanced_content` \| `ocr_low_confidence` \| `gross_divergence` \| `other` |
+| `issue_type` | ✓ | enum `missing_content` \| `extra_content` \| `numeric_mismatch` \| `literal_mismatch` \| `structure_mismatch` \| `heading_level` \| `table_shape` \| `duplicated_header` \| `reading_order` \| `unprovenanced_content` \| `ocr_low_confidence` \| `gross_divergence` \| `other` |
 | `description` | ✓ | str |
 | `defect_class` | ✓ | enum `extraction_error` \| `reconciliation_error` \| `disallowed_transformation` (FR-034a) |
 | `check_origin` | ✓ | enum `deterministic` \| `semantic` |
 | `source_location` / `expected` / `found` / `suggested_action` | – | str (FR-035) |
 | `markdown_region` | – | `{start_line,start_col,end_line,end_col}` — the region `fix` may touch |
 | `reconciliation_ref` | – | `decision_id` — set on `reconciliation_error` so `fix` can route it (FR-045a) |
+
+`literal_mismatch` = source-backed **non-numeric** literal text that is present in both the
+source / extraction evidence and the produced output but whose value was **altered** (the
+"modified literal" fault of SC-025 / T094). It is kept distinct from `missing_content` (present
+in source, absent from output), `extra_content` (present in output, unsupported by source),
+`numeric_mismatch` (an altered numeric or monetary value — that type still applies), and
+`reading_order` / `structure_mismatch` (ordering and structural-transformation errors, not
+literal-value alteration). Its `defect_class` is assigned exactly as for any other issue
+(`extraction_error` / `reconciliation_error` / `disallowed_transformation`, FR-034a) — this new
+value changes only the `issue_type` vocabulary, not the defect-class model or any detection rule.
 
 `summary`: `{ error, warning, info, gross_divergence: bool, source_text_match_rate: float,
 gross_divergence_threshold: float }` (all always populated).

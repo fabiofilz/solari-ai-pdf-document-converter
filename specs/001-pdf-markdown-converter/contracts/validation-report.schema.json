@@ -85,10 +85,11 @@
           "markdown_line": { "type": "integer", "minimum": 1 },
           "markdown_column": { "type": "integer", "minimum": 1 },
           "issue_type": {
-            "enum": ["missing_content", "extra_content", "numeric_mismatch",
+            "enum": ["missing_content", "extra_content", "numeric_mismatch", "literal_mismatch",
               "structure_mismatch", "heading_level", "table_shape", "duplicated_header",
               "reading_order", "unprovenanced_content", "ocr_low_confidence",
-              "gross_divergence", "other"]
+              "gross_divergence", "other"],
+            "description": "literal_mismatch: source-backed non-numeric literal text present in BOTH the source / extraction evidence AND the produced output, but whose literal value was altered (SC-025). Distinct from: missing_content (in source, absent from output); extra_content (in output, unsupported by source); numeric_mismatch (an altered numeric or monetary value — that type still applies); reading_order / structure_mismatch / table_shape / heading_level (ordering and structural-transformation errors, not literal-value alteration)."
           },
           "description": { "type": "string", "minLength": 1 },
           "defect_class": {

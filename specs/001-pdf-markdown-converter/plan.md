@@ -123,14 +123,18 @@ as complete.
   auditability or reproducibility (not a v1 requirement).
 - **Reproducibility — two levels (FR-053a + FR-053b / SC-009)**:
   - **Deterministic core (FR-053a)**: identical `(source hash, normalized selection,
-    enabled paths, OCR engine+model+config, semantic-transform config, reconcile
-    threshold, tool version, applicable human resolutions)` ⇒ byte-identical
+    enabled paths, OCR engine+model+config, reconcile threshold, tool version,
+    applicable human resolutions)` ⇒ byte-identical
     `original Markdown`, DOCX (normalized metadata/ZIP), and the **deterministic
     records** (removal log; the reconciliation log's `deterministic_agreement` +
     `human_confirmed` decisions; traceability record; every `check_origin:
     "deterministic"` part of a validation report). Records carry no wall-clock
     timestamp / random id; `run_id` is a pure digest of that tuple — no
-    wall-clock/random workaround. `langdetect`/detector seed pinned; all LLM calls
+    wall-clock/random workaround. v1 semantic transformation is deterministic and
+    exposes no user-configurable or otherwise output-affecting settings, so it
+    contributes nothing to the tuple or `run_id`; any future output-affecting
+    semantic-transformation configuration must be added to the tuple and run
+    identity (FR-053a). `langdetect`/detector seed pinned; all LLM calls
     `temperature=0` + fixed `seed`; the reconciliation double-call flip check
     (research §4a) turns backend nondeterminism into a review item, not a
     reproducibility violation.
@@ -230,6 +234,38 @@ regenerating — so a re-run still reproduces the bytes, by replay, with no coll
 This is honest without weakening any guard, the source-backed-content invariant, or
 the deterministic core. All seven principles still PASS; Complexity Tracking remains
 empty.
+
+### Concrete-identifier maintenance invariant
+
+The concrete v1 tool choices in the ledger above surface as **persisted / contract
+vocabulary** in four artifacts, which together form a **lockstep-change set**:
+
+| Artifact | Concrete identifiers it fixes |
+|---|---|
+| `contracts/extraction-candidate.schema.json` | the `technique` pattern (`^(docling\|pdfplumber\|ocr:<engine>)$`) |
+| `contracts/cli.md` | the `--ocr-engine` values (`tesseract` \| `rapidocr`); the candidate filenames `<base>.candidate.docling.json` / `.candidate.pdfplumber.json` / `.candidate.ocr.json` |
+| `data-model.md` | the `extraction_technique` / `technique` enum (`docling` \| `pdfplumber` \| `ocr:<engine>`); the pipeline-diagram path labels |
+| `tasks.md` | T035's assertion that `technique` matches `docling\|pdfplumber\|ocr:<engine>` (and any later task that names a concrete engine) |
+
+**Invariant**: a future change that alters a concrete extraction/OCR tool
+**identifier** or a **candidate naming convention** MUST update every member of this
+set that treats that string as a contract or as persisted vocabulary **in the same
+change set** — partial updates across these mirrored artifacts are prohibited.
+
+**Scope of the invariant** — it constrains synchronization, not the choice itself:
+
+- The **technology choice** stays a planning/research decision and MAY still change
+  on evidence: the OCR engine is **benchmark-gated** (research §4, T013), the
+  language detector is still to be selected (research §5), and Camelot or another
+  component MAY be adopted later on demonstrated benefit (research §16). Changing a
+  tool is not prohibited.
+- Only a change that also changes a **persisted or contract identifier** triggers
+  the lockstep update. `research.md` prose (rationale, alternatives, benchmark
+  methodology) is **not** part of this set — it records *why* a choice was made and
+  need not be mechanically re-synced when the identifier strings themselves do not
+  change.
+- The current v1 identifiers (`docling`, `pdfplumber`, `ocr:<engine>`, `tesseract`,
+  `rapidocr`, and the `*.candidate.*.json` names) are **unchanged** by this note.
 
 ## Project Structure
 

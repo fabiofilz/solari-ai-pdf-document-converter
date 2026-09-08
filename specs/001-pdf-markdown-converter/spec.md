@@ -19,10 +19,10 @@
 - Q: When `validate` detects gross divergence and will skip the semantic pass, does it still require a reachable local LLM? → A: No. The deterministic match-rate check runs first; when it detects gross divergence, `validate` skips the LLM probe and the semantic pass entirely and produces the gross-divergence report without a local LLM. A reachable LLM is still required for any run that does not short-circuit.
 - Q: How is the processing pipeline structured with respect to source fidelity vs semantic transformation? → A: (SUPERSEDED by the independent-extraction refinement below — retained for history.) The earlier decision was a sequential model: one source-faithful extraction → fidelity validation of that single representation → semantic transformation → transformation validation → Markdown. This is replaced by the multi-path independent-extraction → reconciliation → transformation → final-validation model.
 - Q: How does OCR behave on mixed/hybrid PDFs where native text quality varies within and across pages? → A: (Previously-decided OCR behavior; still applicable, now framed as one of the independent extraction paths.) OCR MUST be adaptive and region-aware, decided per page and per region — never document-wide by default. Native text is preferred wherever it is reliable; OCR is used only for pages/regions where native text is absent, incomplete, corrupted, or materially unreliable. Native and OCR-derived content may coexist on the same page, and a single region needing OCR MUST NOT cause OCR to replace reliable native text elsewhere. Every extracted region retains provenance: source page, source region/bbox where available, extraction technique, and OCR language/config where OCR was used. Pages/regions are conceptually classified as `native_text_sufficient`, `ocr_required`, or `hybrid_native_and_ocr`. OCR-derived text is subject to the same non-rewriting rule as all extracted text: no LLM may generate, improve, paraphrase, or substitute it.
-- Q: (Refinement) How are extraction and reconciliation actually structured? → A: (Previously-decided architecture, recorded here — supersedes the sequential model above.) The original PDF is processed by **multiple independent extraction paths** — (A) Docling, (B) pdfplumber + pypdfium2, (C) local OCR when needed — where no path may consume another path's output, so an error in one technique cannot propagate. Their outputs are then **reconciled** into a Canonical Extracted Document — via two sub-processes, literal-content reconciliation and reading-order reconciliation (see the reading-order refinement below): deterministic where the sources agree; where they materially disagree a local LLM MAY *select among the existing candidates only* (never generate, rewrite, paraphrase, correct, complete, normalize, combine, or substitute a value absent from the candidates), enforced programmatically, not by prompt text. The default reconciliation confidence threshold is 0.75 (configurable); below it the conflict becomes HUMAN_REVIEW_REQUIRED and is never silently guessed. Only after reconciliation does **semantic transformation** run (deterministic; the operations already specified; no LLM text rewriting). The transformed document then undergoes **final fidelity validation** against the original PDF and/or the independent extraction evidence — not merely the previous stage — detecting omissions, altered literals, incorrect reconciliation, invalid transformations, bad structural reconstruction, and unprovenanced content. The final Markdown is delivered only per the validation policy. Provenance, auditability, immutability, and the prohibition on presenting incomplete artifacts as complete all carry over.
-- Q: (Resolves C-1) What is Docling's structural interpretation authoritative for? → A: Nothing, during extraction/reconciliation. Docling MAY do layout analysis, reading-order inference, and heading/table detection while extracting, but every such interpretation — from Docling or any extractor — is **candidate evidence**. Its heading/list/table detection is a **structural hint** that reconciliation carries forward unaltered and unapplied (it MUST NOT accept, reject, merge, or act on a hint); only semantic transformation may accept/reject/apply hints, recording which it used. Its **reading-order inference** is handled differently — see the reading-order refinement below. The Canonical Extracted Document holds reconciled literal content, the accepted reading order, provenance, extraction evidence, and structural hints, but stays in a pre-semantic-transformation state. A Docling structural inference is evidence, not an authoritative transformation.
+- Q: (Refinement) How are extraction and reconciliation actually structured? → A: (Previously-decided architecture, recorded here — supersedes the sequential model above.) The original PDF is processed by **multiple independent extraction paths** — (A) a layout-aware structural extraction path, (B) a low-level geometry-aware PDF text extraction path, (C) conditional local OCR when needed — where no path may consume another path's output, so an error in one technique cannot propagate. Their outputs are then **reconciled** into a Canonical Extracted Document — via two sub-processes, literal-content reconciliation and reading-order reconciliation (see the reading-order refinement below): deterministic where the sources agree; where they materially disagree a local LLM MAY *select among the existing candidates only* (never generate, rewrite, paraphrase, correct, complete, normalize, combine, or substitute a value absent from the candidates), enforced programmatically, not by prompt text. The default reconciliation confidence threshold is 0.75 (configurable); below it the conflict becomes HUMAN_REVIEW_REQUIRED and is never silently guessed. Only after reconciliation does **semantic transformation** run (deterministic; the operations already specified; no LLM text rewriting). The transformed document then undergoes **final fidelity validation** against the original PDF and/or the independent extraction evidence — not merely the previous stage — detecting omissions, altered literals, incorrect reconciliation, invalid transformations, bad structural reconstruction, and unprovenanced content. The final Markdown is delivered only per the validation policy. Provenance, auditability, immutability, and the prohibition on presenting incomplete artifacts as complete all carry over.
+- Q: (Resolves C-1) What is the layout-aware structural extraction path's structural interpretation authoritative for? → A: Nothing, during extraction/reconciliation. That path MAY do layout analysis, reading-order inference, and heading/table detection while extracting, but every such interpretation — from any extraction path — is **candidate evidence**. Its heading/list/table detection is a **structural hint** that reconciliation carries forward unaltered and unapplied (it MUST NOT accept, reject, merge, or act on a hint); only semantic transformation may accept/reject/apply hints, recording which it used. Its **reading-order inference** is handled differently — see the reading-order refinement below. The Canonical Extracted Document holds reconciled literal content, the accepted reading order, provenance, extraction evidence, and structural hints, but stays in a pre-semantic-transformation state. A structural inference from any extraction path is evidence, not an authoritative transformation.
 - Q: (Resolves R-1/R-2) How is reading order handled across the independent extraction candidates? → A: Reading order is **independent extraction evidence**, not part of literal-text correctness. Each candidate keeps its own literal content, geometry/bboxes, candidate reading order, structural hints, and provenance separately. Extraction reconciliation therefore has two distinct sub-processes: **literal-content reconciliation** (which existing extracted content is accepted) and **reading-order reconciliation** (the accepted ordering of the existing source-backed segments). Reading-order reconciliation operates only on existing segments and candidate orders plus geometry/layout evidence — the LLM may never invent, rewrite, split, merge, or construct text, and may never produce an order unsupported by the evidence. It is deterministic where candidate orders agree or geometry resolves them; otherwise the LLM MAY select among existing candidate orders at confidence ≥ 0.75, and below 0.75 a reading-order HUMAN_REVIEW_REQUIRED item is raised (page, affected regions/bboxes, candidate segment ids, candidate orders, contributing sources, reason, confidence), resolved by a human inspecting the PDF and recorded as `human_confirmed`. Reading-order reconciliation completes before semantic transformation; semantic transformation may still do paragraph/list/heading/table-stitch operations but MUST keep any re-ordering it needs distinguishable from this source-ordering decision.
-- Q: (Resolves H1 — reproducibility of LLM-assisted validation) Can FR-053a / SC-009 promise byte-identical audit records when a local LLM backend is non-deterministic? → A: No — split the guarantee into two levels. **FR-053a (deterministic core)**: the Markdown, DOCX, and every `check_origin: "deterministic"` record are byte-reproducible for identical effective inputs (source hash, normalized selection, enabled paths, OCR engine/model/config, semantic-transform config, reconcile threshold, tool version, applicable `human_confirmed` resolutions); `run_id` stays a pure function of those, with no wall-clock/random workaround. **FR-053b (LLM-assisted results)**: byte-identical *only* when the backend provides `temperature: 0` + a reliable `seed`; then the report records `llm.reproducibility: "deterministic"`. When it cannot, the report records `"best_effort"`, states the backend cannot guarantee deterministic regeneration, and a re-run **replays** the persisted semantic section for an identical applicability context rather than regenerating it or raising a collision. Deterministic guards, candidate-selection invariants, and the no-source-modification rule stay mandatory. SC-009 is restated in these two levels so it is measurable and does not over-promise.
+- Q: (Resolves H1 — reproducibility of LLM-assisted validation) Can FR-053a / SC-009 promise byte-identical audit records when a local LLM backend is non-deterministic? → A: No — split the guarantee into two levels. **FR-053a (deterministic core)**: the Markdown, DOCX, and every `check_origin: "deterministic"` record are byte-reproducible for identical effective inputs (source hash, normalized selection, enabled paths, OCR engine/model/config, reconcile threshold, tool version, applicable `human_confirmed` resolutions); `run_id` stays a pure function of those, with no wall-clock/random workaround. (v1 semantic transformation is deterministic and has no output-affecting configuration, so it adds nothing to the effective inputs; any future output-affecting semantic-transformation setting must then be added — see FR-053a.) **FR-053b (LLM-assisted results)**: byte-identical *only* when the backend provides `temperature: 0` + a reliable `seed`; then the report records `llm.reproducibility: "deterministic"`. When it cannot, the report records `"best_effort"`, states the backend cannot guarantee deterministic regeneration, and a re-run **replays** the persisted semantic section for an identical applicability context rather than regenerating it or raising a collision. Deterministic guards, candidate-selection invariants, and the no-source-modification rule stay mandatory. SC-009 is restated in these two levels so it is measurable and does not over-promise.
 - Q: (Resolves the HUMAN_REVIEW_REQUIRED workflow) What is the full lifecycle of a human-review item? → A: HUMAN_REVIEW_REQUIRED is an explicit reconciliation state (not a validation warning), raised from any reconciliation decision below the confidence threshold. A reviewer resolves it against the original PDF: for a literal conflict, by selecting a candidate or — only when none is correct — entering a value verified against the PDF (recorded `human_confirmed` with manually-verified provenance; no automatic stage or LLM ever gets this permission); for a reading-order conflict, by ordering the existing segments without rewriting their content. Every resolution is persisted to a durable, append-only, cross-run **resolution store** (source hash, page/region, conflict type, candidate evidence, selected/entered value, accepted ordering, `decision_method = human_confirmed`, link to the review item). Resolutions are deterministic replay inputs: an unchanged applicable resolution is replayed (not re-asked) and yields the same result; when its output-affecting context changed it is not replayed and a fresh item is raised; the applicability key's exact shape is a planning decision but must carry enough source + configuration identity to prevent misapplication. Any unresolved item blocks the run's final Markdown (intermediate artifacts + the queue may still be written); once all are resolved, re-running resumes from the right reconciliation state with no hand-editing of Markdown. This is distinct from `fix`: human review resolves extraction-reconciliation uncertainty; `fix` addresses post-transformation defects; a `reconciliation_error` found by final validation is routed back to the human-review layer, never patched Markdown-only. The concrete CLI / UI / file format is a planning/contract decision.
 
 ### Session 2026-09-05
@@ -54,7 +54,8 @@ The output file has a deterministic name derived from the source filename and th
 selected page ranges, and no existing file is overwritten.
 
 Internally `extract` runs the pipeline (FR-059): the PDF is extracted by several
-independent paths (Docling; pdfplumber + pypdfium2; OCR where needed), their
+independent paths (a layout-aware structural extraction path; a low-level
+geometry-aware PDF text extraction path; conditional local OCR where needed), their
 outputs are reconciled into a Canonical Extracted Document, and only then are the
 semantic transformations above applied and the Markdown rendered, subject to final
 fidelity validation. Where the extraction paths disagree and the tool is not
@@ -421,7 +422,8 @@ and no network egress occurred.
   an intentional transformation**: final fidelity validation reports it, defaulting
   to the more serious class and noting the ambiguity, rather than silently treating
   it as an allowed transformation.
-- **One extraction path fails entirely** (e.g. Docling errors on a page): the
+- **One extraction path fails entirely** (e.g. the layout-aware structural
+  extraction path errors on a page): the
   remaining independent paths still run; reconciliation proceeds with the
   candidates it has, and the missing path is noted in the reconciliation log — one
   path's failure never blocks the others (FR-060).
@@ -447,11 +449,13 @@ all **stage-3 semantic transformations** and MUST NOT occur before reconciliatio
   has produced a Canonical Extracted Document (with an accepted reading order) for
   the requested pages. This model replaces the earlier sequential model entirely.
 - **FR-060**: The original PDF MUST be processed **independently** by multiple
-  extraction techniques. For v1 the primary paths are: (A) **Docling**, processing
+  extraction techniques. For v1 the primary paths are: (A) a **layout-aware
+  structural extraction path**, processing
   the original PDF directly and producing its own extraction candidate (literal
-  content plus structural hints — see FR-060b); (B) **pdfplumber + pypdfium2**,
-  processing the original PDF independently of Docling and producing a second
-  extraction / evidence candidate; (C) **local OCR**, used when necessary — not
+  content plus structural hints — see FR-060b); (B) a **low-level geometry-aware
+  PDF text extraction path**,
+  processing the original PDF independently of path A and producing a second
+  extraction / evidence candidate; (C) **conditional local OCR**, used when necessary — not
   mandatory for every
   page, MUST support mixed PDFs where some pages have usable native text and others
   are image-only or otherwise require OCR (per FR-024–FR-027b), producing an
@@ -466,7 +470,8 @@ all **stage-3 semantic transformations** and MUST NOT occur before reconciliatio
   (source PDF page, extraction technique, and for OCR the language(s) /
   configuration). Reading order is kept as its own field, not folded into
   literal-text correctness.
-- **FR-060b**: An extractor (Docling in particular) MAY perform layout analysis,
+- **FR-060b**: An extractor (the layout-aware structural extraction path in
+  particular) MAY perform layout analysis,
   reading-order inference, and heading / table / structure detection while
   extracting. Its **reading-order inference** is candidate evidence for
   reading-order reconciliation (FR-061d) and MUST NOT automatically become the
@@ -474,7 +479,7 @@ all **stage-3 semantic transformations** and MUST NOT occur before reconciliatio
   table detection) is a **structural hint** — evidence only, neither reconciled nor
   applied before semantic transformation (FR-061c / FR-064). Neither may directly
   modify or define the Canonical Extracted Document's semantic structure during
-  extraction or reconciliation. A Docling structural inference is evidence, not an
+  extraction or reconciliation. Such a structural inference is evidence, not an
   authoritative transformation.
 - **FR-061**: After the independent extraction paths complete, extraction
   reconciliation assembles the **Canonical Extracted Document** through two distinct
@@ -585,7 +590,7 @@ all **stage-3 semantic transformations** and MUST NOT occur before reconciliatio
   reconciliation (FR-061d) and MUST NOT silently re-order source segments; if a
   structural operation would require a different segment order, that is a distinct,
   recorded decision, not part of the earlier source-ordering decision. A structural
-  hint (including any Docling inference) is advisory: this stage decides whether to
+  hint (from any extraction path) is advisory: this stage decides whether to
   use it, and MUST record that decision so it is auditable and distinguishable from
   the reading-order decision. Semantic transformation MUST NOT use an LLM to
   rewrite, improve, correct, paraphrase, or replace source text. Any textual result
@@ -607,9 +612,14 @@ all **stage-3 semantic transformations** and MUST NOT occur before reconciliatio
   originating PDF page / region, the contributing extraction source(s), and the
   reconciliation decision. This provenance chain backs SC-001 and the source
   locations reported by `validate`.
-- **FR-066a**: The externally invocable operations remain `extract`, `validate`,
-  `fix`, `export`, and `convert`. `extract` performs stages 1–3 plus a built-in
-  final fidelity self-check. When reconciliation raises HUMAN_REVIEW_REQUIRED
+- **FR-066a**: The externally invocable **document-processing** operations remain
+  `extract`, `validate`, `fix`, `export`, and `convert`. In addition, the
+  human-review workflow (FR-067–FR-074) is driven through its own dedicated
+  operation — the `review` command at the CLI/contract layer, whose name and
+  interaction surface FR-074 delegates to planning/contracts. The tool's full
+  invocable surface is therefore these five document-processing operations **plus**
+  the separate human-review operation. `extract` performs stages 1–3 plus a
+  built-in final fidelity self-check. When reconciliation raises HUMAN_REVIEW_REQUIRED
   items, `extract` emits the human-review queue and the intermediate artifacts and
   delivers **no** "original Markdown" for that run (FR-072); otherwise it emits the
   "original Markdown" subject to the validation policy. The `validate` operation
@@ -750,7 +760,8 @@ reconciliation. FR-015 governs reading order, which is reconciled evidence
   not as part of literal-text correctness. Each extraction technique produces its
   own **candidate reading order** over its source-backed segments; two techniques
   MAY yield identical literal text but different candidate orders, and no single
-  extractor's order (Docling's included) is adopted implicitly. The **accepted
+  extractor's order is adopted implicitly — not even that of the layout-aware
+  structural extraction path. The **accepted
   reading order** is fixed by reading-order reconciliation (FR-061d) and recorded
   in the Canonical Extracted Document; once fixed, it MUST be preserved unchanged
   through semantic transformation and into the final Markdown (semantic
@@ -765,7 +776,7 @@ inference, list reconstruction, and multi-page table stitching operate on the
 Canonical Extracted Document — which already carries the **accepted reading order**
 (FR-061d) and each value's originating page and contributing extraction source(s)
 (FR-063/FR-066). This stage MAY use the structural hints carried in that document
-(including Docling's) as advisory input, recording which it applied; the hints are
+(from any extraction path) as advisory input, recording which it applied; the hints are
 never authoritative on their own (FR-060b/FR-064). Any re-ordering a structural
 operation needs is a distinct recorded decision, kept separate from the source
 reading-order decision.*
@@ -993,10 +1004,9 @@ unresolved source reading order — those go through the human-review workflow
   byte-reproducible for **identical effective inputs**. Effective inputs are:
   source identity (hash); normalized page selection; enabled extraction paths; the
   selected OCR engine + model + config; the OCR language override; the OCR
-  confidence threshold; the semantic-transformation configuration; the
-  reconciliation confidence threshold; the tool version; and the set of applicable
-  `human_confirmed` resolutions replayed for the run (FR-071). For identical
-  effective inputs the **original Markdown**, the **DOCX** (under the normalized
+  confidence threshold; the reconciliation confidence threshold; the tool version;
+  and the set of applicable `human_confirmed` resolutions replayed for the run
+  (FR-071). For identical effective inputs the **original Markdown**, the **DOCX** (under the normalized
   metadata / ZIP rules), and the **deterministic records** — the removal log, the
   reconciliation log's `deterministic_agreement` and `human_confirmed` decisions,
   the traceability record, and every `check_origin: "deterministic"` portion of a
@@ -1004,7 +1014,11 @@ unresolved source reading order — those go through the human-review workflow
   wall-clock timestamps or randomly generated identifiers in their persisted body;
   the `run_id` MUST be a pure function of the effective inputs above (and MUST NOT
   introduce wall-clock time, randomness, or a random identifier to work around
-  nondeterminism).
+  nondeterminism). Semantic transformation in v1 is deterministic and exposes **no
+  user-configurable or otherwise output-affecting settings**, so it contributes
+  nothing to the effective inputs or the `run_id`. If a future version introduces
+  any output-affecting semantic-transformation configuration, that setting MUST
+  then be added to the effective inputs above and folded into run identity.
 - **FR-053b** (LLM-assisted audit results): The validation report's
   `check_origin: "semantic"` issues — and any future LLM-produced audit content —
   are reproducible **only to the extent the local LLM backend provides the
@@ -1077,15 +1091,16 @@ unresolved source reading order — those go through the human-review workflow
   geometry / bounding box and provenance — the unit that reading-order
   reconciliation orders (FR-060a/FR-061d). Its content comes from literal-content
   reconciliation; its position comes from reading-order reconciliation.
-- **Extraction candidate**: one extraction path's independent output — the Docling
-  representation, the pdfplumber + pypdfium2 representation, or an OCR
+- **Extraction candidate**: one extraction path's independent output — the
+  layout-aware structural representation, the geometry-aware PDF text
+  representation, or an OCR
   representation — as a set of source-backed segments. Per segment: verbatim text,
   geometry, that candidate's **reading-order position**, provenance (technique,
   page, bbox, OCR language/config), and any **structural hints**. Never derived
   from another path's output (FR-060).
 - **Candidate reading order**: one extractor's inferred ordering of its segments.
   Evidence for reading-order reconciliation (FR-061d); never adopted implicitly as
-  canonical, not even Docling's.
+  canonical, not even that of the layout-aware structural extraction path.
 - **Structural hint**: a heading / list / table interpretation produced by an
   extractor. Advisory evidence only — attributed to its source, carried through
   reconciliation unaltered, and accepted / rejected / applied solely by semantic
@@ -1252,7 +1267,8 @@ unresolved source reading order — those go through the human-review workflow
   available — not merely the prior stage: a seeded reconciliation error and a
   seeded transformation error are each detected in 100% of runs on the test corpus.
 - **SC-026**: The Canonical Extracted Document applies zero structural hints — for
-  a fixture where Docling infers a heading that the other extractors do not, the
+  a fixture where the layout-aware structural extraction path infers a heading that
+  the other extraction paths do not, the
   Canonical Extracted Document still holds that text as literal content plus the
   hint as attributed evidence, and only the semantic transformation stage's
   recorded decision determines whether it becomes a heading — 100% of such cases.
@@ -1277,9 +1293,10 @@ unresolved source reading order — those go through the human-review workflow
 
 ## Assumptions
 
-- The primary interface is a command-line application exposing the operations
-  `extract`, `validate`, `fix`, `export`, and `convert`; a graphical interface is
-  out of scope for the first version.
+- The primary interface is a command-line application. It exposes the five
+  document-processing operations `extract`, `validate`, `fix`, `export`, and
+  `convert`, plus a separate `review` operation for the human-review workflow
+  (FR-066a / FR-074); a graphical interface is out of scope for the first version.
 - One source PDF is processed per invocation; batch processing of multiple PDFs is
   out of scope for the first version.
 - Physical PDF pages are indexed from 1.
@@ -1290,11 +1307,14 @@ unresolved source reading order — those go through the human-review workflow
   on it (except a `validate` run that short-circuits on gross divergence). `extract`
   does not require it: without an LLM, reconciliation is deterministic-only and
   unresolved disagreements become HUMAN_REVIEW_REQUIRED items.
-- The independent extraction paths for v1 are Docling, pdfplumber + pypdfium2, and
-  local OCR. The architectural requirement is multi-path independence (no path
-  consumes another's output) plus at least two structural extractors and OCR; the
-  specific tools are a planning choice. Under Constitution VII (v2.0.0,
-  "Simplicity & Justified Dependencies") a heavier component such as Docling is
+- The independent extraction paths for v1 are a layout-aware structural extraction
+  path, a low-level geometry-aware PDF text extraction path, and conditional local
+  OCR. The architectural requirement is multi-path independence (no path
+  consumes another's output) plus at least two independent non-OCR extraction paths
+  and conditional local OCR; the
+  specific tools are a planning / research decision. Under Constitution VII (v2.0.0,
+  "Simplicity & Justified Dependencies") a heavier component — for example one that
+  performs machine-learning-based layout analysis — is
   acceptable when its fidelity / validation / diagnosability benefit is documented
   and justified and it stays compatible with Principle V (local-first) — its
   runtime weight or model download is not by itself disqualifying.
@@ -1330,7 +1350,8 @@ unresolved source reading order — those go through the human-review workflow
   reconciliation only ever selects an existing candidate order or a
   geometry-supported order and never fabricates one.
 - How the semantic transformation stage weighs competing structural hints (e.g.
-  Docling says "heading", pdfplumber layout suggests "body") and records its
+  the layout-aware path says "heading" while geometric evidence suggests "body")
+  and records its
   decision is a planning decision; the requirement is only that hints are advisory
   and the decision is auditable and kept distinct from the reading-order decision.
 - Local OCR runs entirely on the user's machine; it is adaptive and region-aware
@@ -1343,8 +1364,8 @@ unresolved source reading order — those go through the human-review workflow
   reads low-level native-text evidence **directly from the source PDF / page
   representation** and MUST NOT consume any extraction path's `ExtractionCandidate`
   — it is an extraction-routing / evidence component that runs before the OCR path
-  (path C), not a fourth extraction path and not a consumer of the Docling,
-  pdfplumber, or OCR candidate output. (Preserves FR-060 / SC-024 path
+  (path C), not a fourth extraction path and not a consumer of any extraction
+  path's candidate output. (Preserves FR-060 / SC-024 path
   independence.)
 - DOCX export uses standard built-in Word styles (heading levels, body/normal,
   bulleted and numbered list styles, table style) unless the user supplies a

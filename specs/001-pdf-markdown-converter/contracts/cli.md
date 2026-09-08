@@ -46,9 +46,10 @@
   - **Deterministic core**: `original Markdown`, DOCX, and the **deterministic** content of every
     record (incl. each validation report's `check_origin: "deterministic"` issues + `summary`)
     are byte-identical for identical `(source hash, page selection, enabled paths, OCR
-    engine+model+config, semantic-transform config, reconcile threshold, tool version, applicable
-    human resolutions)`. Records carry no wall-clock timestamp / random id — a content-derived
-    `run_id`.
+    engine+model+config, reconcile threshold, tool version, applicable human resolutions)`.
+    (v1 semantic transformation is deterministic and has no output-affecting configuration, so it
+    is not part of this tuple; a future output-affecting semantic-transform setting would join it
+    — FR-053a.) Records carry no wall-clock timestamp / random id — a content-derived `run_id`.
   - **LLM-assisted**: a validation report's `check_origin: "semantic"` section is byte-identical
     only when the backend honours `seed` (`llm.reproducibility: "deterministic"`); otherwise
     `"best_effort"` and the section is reproduced by **replay** of a persisted report, not
