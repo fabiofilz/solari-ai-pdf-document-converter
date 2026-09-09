@@ -162,6 +162,106 @@ def test_equal_values_are_not_material():
 
 
 # --------------------------------------------------------------------------------------
+# Unicode-safe case classification — no str.casefold() (block brief §2)
+# --------------------------------------------------------------------------------------
+
+
+def test_ascii_case_only_pair_is_classified_case_not_material():
+    c = _conf()
+    assert c.classify_diff("Total", "total") == "case"
+    assert c.is_material("Total", "TOTAL") is False
+
+
+def test_ligature_versus_expanded_letters_is_material():
+    c = _conf()
+    assert c.classify_diff("ﬁle", "file") == "material"
+    assert c.is_material("ﬁle", "file") is True
+
+
+def test_eszett_versus_double_s_is_material():
+    c = _conf()
+    assert c.is_material("ß", "SS") is True
+    assert c.is_material("STRASSE", "STRAßE") is True
+
+
+def test_long_s_fold_equivalence_remains_material():
+    # ſ (U+017F) casefolds to "s" but is not a simple 1:1 letter-case distinction
+    c = _conf()
+    assert c.is_material("ſ", "s") is True
+
+
+def test_length_changing_fold_equivalence_remains_material():
+    # ﬀ (U+FB00) casefolds to "ff"
+    c = _conf()
+    assert c.is_material("ﬀ", "ff") is True
+
+
+# --------------------------------------------------------------------------------------
+# group-level materiality — native/native vs native+OCR case policy (block brief §3)
+# --------------------------------------------------------------------------------------
+
+
+def test_native_vs_native_case_only_disagreement_is_material_at_group_level():
+    c, align = _conf(), _align()
+
+    def build(first_docling: bool):
+        d = _seg("d1", (100.0, 100.0, 300.0, 120.0), "Total", 0, technique="docling")
+        p = _seg("p1", (100.0, 100.0, 300.0, 120.0), "total", 0, technique="pdfplumber")
+        return _group(align, d, p) if first_docling else _group(align, p, d)
+
+    for g in (build(True), build(False)):
+        assert c.classify_group_diff(g) == "material"
+        assert c.group_material_disagreement(g) is True
+
+
+def test_native_agreement_plus_ocr_case_difference_is_not_material():
+    c, align = _conf(), _align()
+    g = _group(
+        align,
+        _seg("d1", (100.0, 100.0, 300.0, 120.0), "Total", 0, technique="docling"),
+        _seg("p1", (100.0, 100.0, 300.0, 120.0), "Total", 0, technique="pdfplumber"),
+        _seg("o1", (100.0, 100.0, 300.0, 120.0), "total", 0, origin="ocr",
+             technique="ocr:tesseract", ocr_conf=70.0),
+    )
+    assert c.classify_group_diff(g) == "case"
+    assert c.group_material_disagreement(g) is False
+
+
+def test_group_whitespace_only_difference_stays_non_material():
+    c, align = _conf(), _align()
+    g = _group(
+        align,
+        _seg("d1", (100.0, 100.0, 300.0, 120.0), "foo bar", 0, technique="docling"),
+        _seg("p1", (100.0, 100.0, 300.0, 120.0), "foo  bar", 0, technique="pdfplumber"),
+    )
+    assert c.group_material_disagreement(g) is False
+
+
+def test_native_vs_native_case_disagreement_confidence_stays_below_threshold():
+    c, align = _conf(), _align()
+    g = _group(
+        align,
+        _seg("d1", (100.0, 100.0, 300.0, 120.0), "Total", 0, technique="docling"),
+        _seg("p1", (100.0, 100.0, 300.0, 120.0), "total", 0, technique="pdfplumber"),
+    )
+    # flows through the material-confidence path and stays < 0.75 (→ HUMAN_REVIEW in T060)
+    assert c.literal_confidence(g) < 0.75
+
+
+def test_classification_never_mutates_stored_literal_values():
+    c, align = _conf(), _align()
+    g = _group(
+        align,
+        _seg("d1", (100.0, 100.0, 300.0, 120.0), "Total", 0, technique="docling"),
+        _seg("p1", (100.0, 100.0, 300.0, 120.0), "total", 0, technique="pdfplumber"),
+    )
+    c.classify_group_diff(g)
+    c.literal_confidence(g)
+    c.is_material("Total", "total")
+    assert {m.text for m in g.members} == {"Total", "total"}
+
+
+# --------------------------------------------------------------------------------------
 # technique precedence — M2 resolution (block brief §6)
 # --------------------------------------------------------------------------------------
 

@@ -8,15 +8,26 @@ Pipeline (research §21c):
 
 * :func:`build_candidate_orders` — project each extraction technique's own
   reading-order opinion onto the aligned groups (evidence only, FR-060b);
-* :func:`geometric_order` — the **deterministic geometric resolver**: detect columns by
-  x-projection gaps, then order top-to-bottom within a column (``SourceRef.bbox`` is
-  top-left origin — smaller ``y`` is higher on the page, per ``extract/plumber_path`` /
-  ``extract/docling_path``), columns left-to-right. Returns a **full permutation** of
-  the scope ids, or ``None`` when geometry cannot support one (two regions with no
-  geometric precedence between them);
+* :func:`geometric_order` — the **deterministic, band-aware geometric resolver**
+  (block brief §5). Full-width regions (a heading, a footer, a mid-page subheading —
+  width ≥ :data:`SPANNING_REGION_MIN_WIDTH_FRACTION` of the page x-span) are
+  *spanning* regions; they divide the page into vertical **bands**. Column detection
+  runs **per band**, over that band's non-spanning regions only, so a full-width
+  heading can never collapse the page into one interleaved column. Within a band:
+  columns left-to-right, members top-to-bottom (``SourceRef.bbox`` is top-left origin
+  — smaller ``y`` is higher). Spanning regions are ordered by their vertical position
+  relative to the bands. Returns a **full permutation** of the scope ids, or ``None``
+  when geometry cannot support one — two regions in the same band/column that overlap
+  vertically with neither clearly above the other yield ``None`` (never a left-to-right
+  guess just because their x differs, block brief §6);
 * :func:`resolve_reading_order` — returns either a :class:`ReadingOrderResolution`
-  (``deterministic_agreement`` — every candidate order agrees, or the geometric
-  resolver is unambiguous) or an explicit :class:`ReadingOrderConflict` descriptor.
+  (``deterministic_agreement`` — **≥ 2** distinct techniques supply agreeing complete
+  permutations, or the geometric resolver is unambiguous) or an explicit
+  :class:`ReadingOrderConflict`. A **lone** technique's complete permutation is not
+  vacuous agreement (block brief §7): it is accepted automatically only when an
+  unambiguous geometric order also supports it. It raises
+  :class:`MixedPhysicalPageError` for a scope spanning more than one physical PDF
+  page — cross-page geometric ordering is never attempted here (block brief §8).
 
 **No silent fallback.** When geometry is ambiguous and the candidate orders disagree
 this module returns a conflict — never candidate-iteration order, a ``segment_id`` sort,
@@ -30,7 +41,6 @@ not ``Config`` fields; run identity unchanged).
 
 from __future__ import annotations
 
-import functools
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -39,6 +49,8 @@ from solari_converter.reconcile.align import AlignedSegmentGroup
 
 __all__ = [
     "KENDALL_TAU_DISAGREEMENT_THRESHOLD",
+    "SPANNING_REGION_MIN_WIDTH_FRACTION",
+    "MixedPhysicalPageError",
     "ReadingOrderResolution",
     "ReadingOrderConflict",
     "build_candidate_orders",
@@ -48,19 +60,32 @@ __all__ = [
 ]
 
 #: Normalised Kendall-τ distance (discordant pairs / total pairs, in ``[0, 1]``) above
-#: which two candidate orders are treated as *materially* disagreeing. Unpinned by the
+#: which two candidate orders are treated as *materially* disagreeing. Kept as
+#: disagreement evidence for the T059 confidence tier — final reading-order arbitration
+#: is **T059**, never a gate in this module (block brief §9). Unpinned by the
 #: architecture (research §14) → an implementation constant, keyword-injectable.
 KENDALL_TAU_DISAGREEMENT_THRESHOLD: float = 0.25
 
-#: Two group x-intervals separated by a gap at least this fraction of the page x-span
+#: A region whose width is at least this fraction of the page x-span is a *spanning*
+#: region (full-width heading / footer / subheading). Spanning regions partition the
+#: page into vertical bands; column detection runs per band over non-spanning regions
+#: only, so a full-width heading cannot collapse the page into one column
+#: (block brief §5). Unpinned by the architecture → an implementation constant.
+SPANNING_REGION_MIN_WIDTH_FRACTION: float = 0.60
+
+#: Two group x-intervals separated by a gap at least this fraction of the band x-span
 #: are in different columns.
 _COLUMN_X_GAP_FRACTION: float = 0.04
 
-#: Vertical slack (PDF units) for "A is above B" within a column.
+#: Vertical slack (PDF units) for "A is strictly above B" within a column / band.
 _Y_ABOVE_EPSILON: float = 1.0
 
-#: Horizontal slack (PDF units) for "A is left of B" when the boxes share a row.
-_X_LEFT_EPSILON: float = 1.0
+
+class MixedPhysicalPageError(ValueError):
+    """:func:`resolve_reading_order` was given regions from more than one physical PDF
+    page. Reading order is reconciled per physical page; cross-page geometric ordering
+    is never attempted here (block brief §8). The later engine reconciles reading order
+    per physical page — this is a defensive invariant."""
 
 
 # --- value types ----------------------------------------------------------------
@@ -112,11 +137,14 @@ def build_candidate_orders(
     return orders
 
 
-def _full_permutation_orders(
+def _full_permutation_orders_by_tech(
     orders: dict[str, list[str]], scope: Sequence[str]
-) -> list[list[str]]:
+) -> dict[str, list[str]]:
+    """The subset of ``orders`` (technique → order) that are **complete** permutations
+    of ``scope`` — a technique that only saw some of the groups is not counted as
+    supplying a candidate order (block brief §7)."""
     target = sorted(scope)
-    return [o for o in orders.values() if sorted(o) == target]
+    return {t: o for t, o in orders.items() if sorted(o) == target}
 
 
 # --- Kendall-τ -----------------------------------------------------------------
@@ -178,59 +206,122 @@ def _column_of(bbox: Sequence[float], boundaries: Sequence[float]) -> int:
     return sum(1 for b in boundaries if center > b)
 
 
-def _precedes(
-    a: AlignedSegmentGroup,
-    b: AlignedSegmentGroup,
-    boundaries: Sequence[float],
-) -> bool | None:
-    """Does ``a`` strictly come before ``b`` by geometry? ``None`` ⇒ incomparable."""
-    ca, cb = _column_of(a.region_bbox, boundaries), _column_of(b.region_bbox, boundaries)
-    if ca != cb:
-        return ca < cb
-    ay0, ay1 = a.region_bbox[1], a.region_bbox[3]
-    by0, by1 = b.region_bbox[1], b.region_bbox[3]
+def _page_x_span(groups: Sequence[AlignedSegmentGroup]) -> float:
+    """Page horizontal span from the regions in scope (block brief §5)."""
+    x0 = min(g.region_bbox[0] for g in groups)
+    x1 = max(g.region_bbox[2] for g in groups)
+    return x1 - x0
+
+
+def _is_spanning(group: AlignedSegmentGroup, page_x_span: float) -> bool:
+    """Is ``group`` a full-width spanning region (heading / footer / subheading)?"""
+    if page_x_span <= 0.0:
+        return False
+    width = group.region_bbox[2] - group.region_bbox[0]
+    return width >= SPANNING_REGION_MIN_WIDTH_FRACTION * page_x_span
+
+
+def _vertical_precedes(a: Sequence[float], b: Sequence[float]) -> bool | None:
+    """Is box ``a`` strictly above box ``b``? ``True`` / ``False`` when one is clearly
+    above the other; ``None`` when they overlap vertically with neither clearly above
+    (an ambiguity the resolver must not paper over — block brief §6)."""
+    ay0, ay1 = a[1], a[3]
+    by0, by1 = b[1], b[3]
     if ay1 <= by0 + _Y_ABOVE_EPSILON:
         return True
     if by1 <= ay0 + _Y_ABOVE_EPSILON:
         return False
-    # boxes share a row -> left to right
-    ax0, ax1 = a.region_bbox[0], a.region_bbox[2]
-    bx0, bx1 = b.region_bbox[0], b.region_bbox[2]
-    if ax1 <= bx0 + _X_LEFT_EPSILON:
-        return True
-    if bx1 <= ax0 + _X_LEFT_EPSILON:
-        return False
     return None
 
 
+def _band_index(bbox: Sequence[float], spanning: Sequence[AlignedSegmentGroup]) -> int | None:
+    """Which vertical band (0..len(spanning)) a non-spanning region sits in, or ``None``
+    when it overlaps a spanning divider (ambiguous — block brief §6). ``spanning`` is
+    sorted top-to-bottom."""
+    ry0, ry1 = bbox[1], bbox[3]
+    idx = 0
+    for k, s in enumerate(spanning):
+        sy0, sy1 = s.region_bbox[1], s.region_bbox[3]
+        if ry0 >= sy1 - _Y_ABOVE_EPSILON:      # fully below this spanning region
+            idx = k + 1
+        elif ry1 <= sy0 + _Y_ABOVE_EPSILON:    # fully above it (and every later one)
+            return idx
+        else:
+            return None                         # straddles a spanning divider
+    return idx
+
+
+def _order_within_band(band: Sequence[AlignedSegmentGroup]) -> list[str] | None:
+    """Left-to-right columns, top-to-bottom within each column, over one band's
+    non-spanning regions. ``None`` when two regions in the same column overlap
+    vertically with neither clearly above the other (block brief §6)."""
+    band = list(band)
+    if len(band) <= 1:
+        return [g.group_id for g in band]
+    boundaries = _columns(band)
+    cols: dict[int, list[AlignedSegmentGroup]] = {}
+    for g in band:
+        cols.setdefault(_column_of(g.region_bbox, boundaries), []).append(g)
+    ordered: list[str] = []
+    for col_idx in sorted(cols):
+        col = cols[col_idx]
+        for i in range(len(col)):
+            for j in range(i + 1, len(col)):
+                if _vertical_precedes(col[i].region_bbox, col[j].region_bbox) is None:
+                    return None
+        col_sorted = sorted(
+            col, key=lambda g: (g.region_bbox[1], g.region_bbox[3], g.group_id)
+        )
+        ordered.extend(g.group_id for g in col_sorted)
+    return ordered
+
+
 def geometric_order(groups: Sequence[AlignedSegmentGroup]) -> list[str] | None:
-    """A full permutation of the scope group ids from column detection + baseline
-    order, or ``None`` when any pair of regions has no geometric precedence between
-    them (the resolver never invents an order)."""
+    """A full permutation of the scope group ids from **band-aware** geometry (block
+    brief §5): full-width spanning regions split the page into vertical bands, columns
+    are detected per band over non-spanning regions only, and spanning regions are
+    ordered by their vertical position between the bands. ``None`` when geometry cannot
+    support one — a region straddling a spanning divider, spanning regions that cannot
+    be vertically ordered, or two same-column regions overlapping vertically with
+    neither clearly above the other. The resolver never invents an order."""
     groups = list(groups)
     if not groups:
         return []
+    if len({g.physical_page for g in groups}) > 1:
+        return None  # cross-page geometry is undefined (see resolve_reading_order)
     scope = _scope_ids(groups)
     if len(scope) != len(set(scope)):
         return None
-    boundaries = _columns(groups)
 
-    for i in range(len(groups)):
-        for j in range(i + 1, len(groups)):
-            if _precedes(groups[i], groups[j], boundaries) is None:
-                return None
+    x_span = _page_x_span(groups)
+    spanning = sorted(
+        (g for g in groups if _is_spanning(g, x_span)),
+        key=lambda g: (g.region_bbox[1], g.region_bbox[3], g.group_id),
+    )
+    non_spanning = [g for g in groups if not _is_spanning(g, x_span)]
 
-    def cmp(a: AlignedSegmentGroup, b: AlignedSegmentGroup) -> int:
-        rel = _precedes(a, b, boundaries)
-        return -1 if rel else 1
-
-    ordered = sorted(groups, key=functools.cmp_to_key(cmp))
-    # verify the produced order is consistent with every adjacent precedence
-    for a, b in zip(ordered, ordered[1:], strict=False):
-        if _precedes(a, b, boundaries) is not True:
+    # spanning regions must be mutually vertically orderable, top-to-bottom
+    for a, b in zip(spanning, spanning[1:], strict=False):
+        if _vertical_precedes(a.region_bbox, b.region_bbox) is not True:
             return None
-    result = [g.group_id for g in ordered]
-    if sorted(result) != scope:
+
+    bands: list[list[AlignedSegmentGroup]] = [[] for _ in range(len(spanning) + 1)]
+    for g in non_spanning:
+        idx = _band_index(g.region_bbox, spanning)
+        if idx is None:
+            return None
+        bands[idx].append(g)
+
+    result: list[str] = []
+    for k, band in enumerate(bands):
+        band_order = _order_within_band(band)
+        if band_order is None:
+            return None
+        result.extend(band_order)
+        if k < len(spanning):
+            result.append(spanning[k].group_id)
+
+    if sorted(result) != scope or len(result) != len(set(result)):
         return None
     return result
 
@@ -244,31 +335,45 @@ def resolve_reading_order(
     kendall_threshold: float = KENDALL_TAU_DISAGREEMENT_THRESHOLD,
 ) -> ReadingOrderResolution | ReadingOrderConflict:
     """Deterministically accept a reading order over ``groups`` or return an explicit
-    conflict descriptor (research §21c). Never falls back to a non-geometric order."""
+    conflict descriptor (research §21c). Never falls back to a non-geometric order.
+
+    Raises :class:`MixedPhysicalPageError` when ``groups`` span more than one physical
+    PDF page (block brief §8)."""
     groups = list(groups)
+    pages = {g.physical_page for g in groups}
+    if len(pages) > 1:
+        raise MixedPhysicalPageError(
+            f"reading-order scope spans multiple physical pages: {sorted(pages)}"
+        )
     scope = _scope_ids(groups)
     cand_orders = build_candidate_orders(groups)
-    full_perms = _full_permutation_orders(cand_orders, scope)
+    full_perms_by_tech = _full_permutation_orders_by_tech(cand_orders, scope)
+    full_perms = list(full_perms_by_tech.values())
     distinct_perms = {tuple(o) for o in full_perms}
     geo = geometric_order(groups)
     geo_tuple = tuple(geo) if geo is not None else None
     max_tau = _max_pairwise_tau(full_perms)
 
-    # 1) every full-permutation candidate order agrees -> deterministic agreement
-    if len(distinct_perms) == 1:
+    # 1) candidate agreement is authoritative only when >= 2 distinct techniques each
+    #    supply a COMPLETE permutation and those permutations agree (block brief §7 — a
+    #    lone technique's full order is not vacuous "agreement").
+    if len(full_perms_by_tech) >= 2 and len(distinct_perms) == 1:
         order = next(iter(distinct_perms))
         _assert_permutation(order, scope)
         return ReadingOrderResolution(order=order, source="candidate_agreement")
 
-    # 2) geometry is unambiguous -> it resolves the order (even against disagreeing
-    #    candidates, research §21c)
+    # 2) an unambiguous band-aware geometric order resolves the scope — it confirms a
+    #    lone candidate order (block brief §7: one full candidate + matching geometry =>
+    #    supported resolution) and overrides candidate disagreement (research §21c).
     if geo is not None:
         _assert_permutation(geo_tuple, scope)
         return ReadingOrderResolution(order=geo_tuple, source="geometry")
 
-    # 3) no supported automatic order
+    # 3) no supported automatic order: a lone/absent candidate order with ambiguous
+    #    geometry, or disagreeing candidates with ambiguous geometry (block brief §7).
     reason = "geometry_ambiguous" if len(scope) >= 2 else "no_supported_order"
-    _ = kendall_threshold  # evidence for the T059 confidence tier; not a gate here
+    _ = kendall_threshold  # disagreement evidence for the T059 confidence tier; final
+    #                        reading-order arbitration is T059, never a gate here (§9)
     return ReadingOrderConflict(
         scope_ids=tuple(scope),
         candidate_orders=tuple(tuple(o) for o in full_perms),

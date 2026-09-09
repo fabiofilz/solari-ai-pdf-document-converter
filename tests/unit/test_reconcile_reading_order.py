@@ -278,6 +278,168 @@ def test_reading_order_never_rewrites_or_resegments_literal_text():
 
 
 # --------------------------------------------------------------------------------------
+# band-aware spanning-region reading order (block brief §5–§8)
+# --------------------------------------------------------------------------------------
+
+# page x-range 100..500 (span 400); spanning threshold 0.60 * 400 = 240.
+_L1 = (100.0, 100.0, 280.0, 130.0)
+_L2 = (100.0, 160.0, 280.0, 190.0)
+_R1 = (320.0, 100.0, 500.0, 130.0)
+_R2 = (320.0, 160.0, 500.0, 190.0)
+_HEADING = (100.0, 40.0, 500.0, 70.0)      # width 400 -> spanning
+_FOOTER = (100.0, 300.0, 500.0, 330.0)     # width 400 -> spanning
+
+
+def _geo_grp(align, gid, bbox, tech):
+    """A one-member group — a rotating technique so no single technique ever supplies a
+    full-permutation candidate order (geometry is the only signal)."""
+    return _grp(align, gid, bbox, [_member(align, tech, f"m-{gid}", 0)])
+
+
+def _rot(i):
+    return ("docling", "pdfplumber", "ocr:tesseract")[i % 3]
+
+
+def _columns_only_page(align):
+    ids = ["L1", "L2", "R1", "R2"]
+    boxes = [_L1, _L2, _R1, _R2]
+    return [
+        _geo_grp(align, g, b, _rot(i))
+        for i, (g, b) in enumerate(zip(ids, boxes, strict=True))
+    ]
+
+
+def test_full_width_heading_above_two_columns_orders_by_band_not_row_interleaved():
+    ro, align = _ro(), _align()
+    groups = [_geo_grp(align, "H", _HEADING, "docling"), *_columns_only_page(align)]
+    geo = ro.geometric_order(groups)
+    assert geo == ["H", "L1", "L2", "R1", "R2"]        # NOT ["H","L1","R1","L2","R2"]
+    res = ro.resolve_reading_order(groups)
+    assert isinstance(res, ro.ReadingOrderResolution)
+    assert res.source == "geometry"
+    assert list(res.order) == ["H", "L1", "L2", "R1", "R2"]
+
+
+def test_two_columns_plus_full_width_footer():
+    ro, align = _ro(), _align()
+    groups = [*_columns_only_page(align), _geo_grp(align, "F", _FOOTER, "docling")]
+    assert ro.geometric_order(groups) == ["L1", "L2", "R1", "R2", "F"]
+
+
+def test_heading_plus_columns_plus_footer():
+    ro, align = _ro(), _align()
+    groups = [
+        _geo_grp(align, "H", _HEADING, "docling"),
+        *_columns_only_page(align),
+        _geo_grp(align, "F", _FOOTER, "pdfplumber"),
+    ]
+    res = ro.resolve_reading_order(groups)
+    assert isinstance(res, ro.ReadingOrderResolution)
+    assert list(res.order) == ["H", "L1", "L2", "R1", "R2", "F"]
+
+
+def test_full_width_mid_page_subheading_separates_two_column_bands():
+    ro, align = _ro(), _align()
+    band_a = {
+        "LA1": (100.0, 100.0, 280.0, 130.0), "LA2": (100.0, 160.0, 280.0, 190.0),
+        "RA1": (320.0, 100.0, 500.0, 130.0), "RA2": (320.0, 160.0, 500.0, 190.0),
+    }
+    band_b = {
+        "LB1": (100.0, 300.0, 280.0, 330.0), "LB2": (100.0, 360.0, 280.0, 390.0),
+        "RB1": (320.0, 300.0, 500.0, 330.0), "RB2": (320.0, 360.0, 500.0, 390.0),
+    }
+    sub = (100.0, 230.0, 500.0, 260.0)
+    groups = [_geo_grp(align, "S", sub, "docling")]
+    for i, (g, b) in enumerate({**band_a, **band_b}.items()):
+        groups.append(_geo_grp(align, g, b, _rot(i)))
+    assert ro.geometric_order(groups) == [
+        "LA1", "LA2", "RA1", "RA2", "S", "LB1", "LB2", "RB1", "RB2",
+    ]
+
+
+def test_two_columns_alone_still_order_left_block_then_right_block():
+    ro, align = _ro(), _align()
+    assert ro.geometric_order(_columns_only_page(align)) == ["L1", "L2", "R1", "R2"]
+
+
+def test_vertically_overlapping_same_column_regions_are_ambiguous_not_left_to_right():
+    ro, align = _ro(), _align()
+    groups = [
+        _geo_grp(align, "A", (100.0, 100.0, 280.0, 170.0), "docling"),
+        _geo_grp(align, "B", (100.0, 140.0, 280.0, 210.0), "pdfplumber"),
+        _geo_grp(align, "C", (320.0, 100.0, 500.0, 130.0), "ocr:tesseract"),
+    ]
+    # A and B overlap vertically in the same column -> no invented order
+    assert ro.geometric_order(groups) is None
+
+
+def test_one_complete_candidate_order_with_ambiguous_geometry_is_a_conflict():
+    ro, align = _ro(), _align()
+    bbox = (100.0, 100.0, 400.0, 140.0)
+    groups = [
+        _grp(align, "a", bbox, [_member(align, "docling", "d-a", 0)]),
+        _grp(align, "b", bbox, [_member(align, "docling", "d-b", 1)]),
+    ]
+    res = ro.resolve_reading_order(groups)
+    assert isinstance(res, ro.ReadingOrderConflict)
+    assert res.geometry_order is None
+
+
+def test_one_complete_candidate_order_with_matching_geometry_resolves():
+    ro, align = _ro(), _align()
+    groups = _linear_page(align, {"docling": (0, 1, 2)})
+    res = ro.resolve_reading_order(groups)
+    assert isinstance(res, ro.ReadingOrderResolution)
+    assert list(res.order) == ["g1", "g2", "g3"]
+
+
+def test_two_matching_complete_candidate_orders_resolve_by_candidate_agreement():
+    ro, align = _ro(), _align()
+    groups = _linear_page(align, {"docling": (0, 1, 2), "pdfplumber": (0, 1, 2)})
+    res = ro.resolve_reading_order(groups)
+    assert isinstance(res, ro.ReadingOrderResolution)
+    assert res.source == "candidate_agreement"
+    assert list(res.order) == ["g1", "g2", "g3"]
+
+
+def test_mixed_physical_pages_are_rejected():
+    ro, align = _ro(), _align()
+    g1 = align.AlignedSegmentGroup(
+        group_id="p1a", physical_page=1, region_bbox=(100.0, 100.0, 400.0, 130.0),
+        members=(_member(align, "docling", "d1", 0),),
+    )
+    g2 = align.AlignedSegmentGroup(
+        group_id="p2a", physical_page=2, region_bbox=(100.0, 200.0, 400.0, 230.0),
+        members=(_member(align, "docling", "d2", 1),),
+    )
+    with pytest.raises(ro.MixedPhysicalPageError):
+        ro.resolve_reading_order([g1, g2])
+    assert ro.geometric_order([g1, g2]) is None
+
+
+def test_every_successful_geometric_order_is_a_full_permutation():
+    ro, align = _ro(), _align()
+    layouts = [
+        _columns_only_page(align),
+        [_geo_grp(align, "H", _HEADING, "docling"), *_columns_only_page(align)],
+        [*_columns_only_page(align), _geo_grp(align, "F", _FOOTER, "docling")],
+        _linear_page(align, {"docling": (0, 1, 2)}),
+    ]
+    for groups in layouts:
+        order = ro.geometric_order(groups)
+        scope = sorted(g.group_id for g in groups)
+        assert order is not None
+        assert sorted(order) == scope
+        assert len(order) == len(set(order)) == len(scope)
+
+
+def test_spanning_region_threshold_is_a_module_constant():
+    ro = _ro()
+    assert isinstance(ro.SPANNING_REGION_MIN_WIDTH_FRACTION, float)
+    assert 0.0 < ro.SPANNING_REGION_MIN_WIDTH_FRACTION < 1.0
+
+
+# --------------------------------------------------------------------------------------
 # T059 — LLM order selection + guard + below-threshold review. RED until Block >= 2.
 # --------------------------------------------------------------------------------------
 

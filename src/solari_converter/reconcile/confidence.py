@@ -11,16 +11,29 @@ Contents
   folding. Nothing else — no NFKC, no ligature expansion, no soft-hyphen removal, no
   replacement-character / mojibake / OCR / punctuation / spelling repair, no case
   folding. It is used to *compare* literals; it never rewrites a stored value.
-* :func:`is_material` — the frozen materiality policy: a whitespace-only or case-only
-  difference is **not material**; every other difference (digits, letters, diacritics,
-  punctuation, ligatures, …) **is**.
+* :func:`is_material` — the pairwise materiality policy: a whitespace-only or a
+  *simple* case-only difference (1:1, non-expanding letter case — never full Unicode
+  case folding) is **not material**; every other difference (digits, letters,
+  diacritics, punctuation, ligatures, ``ß``/``SS``, long-s, …) **is**.
+* :func:`classify_group_diff` / :func:`group_material_disagreement` — the **group**
+  policy layered on the pairwise class: a case-only difference between two *native*
+  extractors (``docling`` vs ``pdfplumber``) is **material** — capitalization can
+  carry legal/semantic weight and neither native path is authoritative, so the
+  technique tie-break must not silently resolve it. A case-only difference is
+  non-material only when the native evidence agrees and OCR is the differing side;
+  whitespace-only stays non-material regardless. Ordering-independent.
 * :data:`NATIVE_TECHNIQUE_PRECEDENCE` / :func:`preferred_technique` / :func:`pick_verbatim`
   — the M2 precedence for choosing among distinct **verbatim** candidates when their
   difference is non-material: native beats OCR; between the two native paths a fixed
   order derived from the frozen technique identifiers (``docling`` < ``pdfplumber``,
-  lexicographic — deterministic, never input-iteration order). This selects among
-  existing verbatim candidates; it never edits candidate text; OCR never outranks
-  native evidence for a non-material difference.
+  lexicographic — deterministic, never input-iteration order). Its authority is
+  **narrow** (block brief §4): it may only pick the representative member / stable
+  ``SourceRef`` and segment identity, choose among candidates whose differing values
+  are already proven non-material, and (later) pick a representative among members
+  carrying an LLM-selected exact value. It never resolves a material literal
+  disagreement, never turns a native-vs-native case disagreement into an automatic
+  decision, never edits candidate text, and never substitutes for the LLM or Human
+  Review. OCR never outranks native evidence for a non-material difference.
 * :func:`literal_confidence` / :func:`reading_order_confidence` — deterministic scores
   in ``[0, 1]`` from {agreement fraction, native-vs-OCR, character class of the diff,
   OCR confidence, Kendall-τ}. The reconciliation acceptance threshold stays
@@ -43,6 +56,8 @@ __all__ = [
     "comparison_key",
     "is_material",
     "classify_diff",
+    "classify_group_diff",
+    "group_material_disagreement",
     "NATIVE_TECHNIQUE_PRECEDENCE",
     "preferred_technique",
     "pick_verbatim",
@@ -85,28 +100,96 @@ _DIFF_MATERIAL = "material"
 #: Difference classes the frozen policy treats as **non-material**.
 _NON_MATERIAL = frozenset({_DIFF_EQUAL, _DIFF_WHITESPACE, _DIFF_CASE})
 
+#: Ordering of the classes by severity, for taking the worst pairwise class in a group.
+_DIFF_ORDER = (_DIFF_EQUAL, _DIFF_WHITESPACE, _DIFF_CASE, _DIFF_MATERIAL)
+
+
+def _is_simple_case_only(a: str, b: str) -> bool:
+    """``True`` when ``a`` and ``b`` differ *only* by simple, 1:1, non-expanding letter
+    case — the safe replacement for ``str.casefold()`` equality (block brief §2).
+
+    Full Unicode case folding changes more than letter case, so it is never used here.
+    A pair is *simple case-only* when the two strings have the same number of Unicode
+    codepoints, they differ in at least one position, and for every differing pair
+    ``(x, y)`` each side is exactly one codepoint, ``x.lower() == y.lower()``, and
+    lowering neither side expands it into multiple codepoints. This keeps ``ﬁ``/``fi``
+    (ligature), ``ß``/``SS`` (expansion), long-s ``ſ``/``s`` and other
+    compatibility-like fold equivalences **material**.
+    """
+    if len(a) != len(b) or a == b:
+        return False
+    differs = False
+    for x, y in zip(a, b, strict=True):
+        if x == y:
+            continue
+        differs = True
+        lx, ly = x.lower(), y.lower()
+        if len(lx) != 1 or len(ly) != 1 or lx != ly:
+            return False
+    return differs
+
 
 def classify_diff(a: str, b: str) -> str:
     """Classify the difference between two literals: ``equal`` | ``whitespace`` |
     ``case`` | ``material`` (block brief §5). Comparison-only normalisation is applied
-    internally; neither input is mutated."""
+    internally; neither input is mutated. ``case`` means *simple* letter case only —
+    see :func:`_is_simple_case_only`; a fold that expands or changes codepoint count
+    (``ﬁ``/``fi``, ``ß``/``SS``, …) is ``material``."""
     if a == b:
         return _DIFF_EQUAL
     ka, kb = comparison_key(a), comparison_key(b)
     if ka == kb:
         return _DIFF_WHITESPACE
-    if ka.casefold() == kb.casefold():
+    if _is_simple_case_only(ka, kb):
         return _DIFF_CASE
     return _DIFF_MATERIAL
 
 
 def is_material(a: str, b: str) -> bool:
-    """``True`` unless the only difference is whitespace or case (frozen policy).
-
-    A case-only difference may be classified non-material here; the *stored* literals
-    are never changed regardless.
+    """``True`` unless the only difference is whitespace or *simple* case (frozen
+    pairwise policy). The **group** policy (:func:`classify_group_diff`) can still
+    escalate a native-vs-native case difference to material. The *stored* literals are
+    never changed regardless.
     """
     return classify_diff(a, b) not in _NON_MATERIAL
+
+
+def classify_group_diff(group: AlignedSegmentGroup) -> str:
+    """The group-level difference class over *all* members' verbatim texts, aware of
+    native vs OCR provenance (block brief §3).
+
+    Returns ``equal`` | ``whitespace`` | ``case`` | ``material``. It escalates a
+    pairwise ``case`` result to ``material`` when two **native** extractors disagree
+    (their comparison keys differ): capitalization can be semantically or legally
+    significant and neither native path is universally authoritative, so the M2
+    technique precedence must not silently resolve the disagreement. A case-only
+    difference stays non-material only when every native member agrees and the
+    differing evidence is OCR. Independent of member ordering.
+    """
+    members = list(group.members)
+    if len(members) <= 1:
+        return _DIFF_EQUAL
+    worst = _DIFF_EQUAL
+    for i in range(len(members)):
+        for j in range(i + 1, len(members)):
+            cls = classify_diff(members[i].text, members[j].text)
+            if _DIFF_ORDER.index(cls) > _DIFF_ORDER.index(worst):
+                worst = cls
+    if worst != _DIFF_CASE:
+        return worst
+    native_keys = {
+        comparison_key(m.text) for m in members if _is_native(m.technique)
+    }
+    if len(native_keys) > 1:
+        return _DIFF_MATERIAL
+    return _DIFF_CASE
+
+
+def group_material_disagreement(group: AlignedSegmentGroup) -> bool:
+    """``True`` when ``group``'s members carry a **material** disagreement under the
+    group policy (:func:`classify_group_diff`) — the signal the T060 dispatch uses to
+    take the material-confidence path instead of deterministic agreement."""
+    return classify_group_diff(group) not in _NON_MATERIAL
 
 
 # --- M2 technique precedence -----------------------------------------------------
@@ -154,8 +237,9 @@ def pick_verbatim(group: AlignedSegmentGroup) -> str:
     """The verbatim text of ``group``'s member chosen by the M2 precedence.
 
     Returns a member's **stored** string byte-for-byte — never a ``comparison_key``
-    form. Used when the members' differences are non-material and one verbatim value
-    must represent the group.
+    form. Used only when the members' differences are **non-material** (see
+    :func:`group_material_disagreement`) and one verbatim value must represent the
+    group; it must not be called to resolve a material disagreement (block brief §4).
     """
     by_tech = {m.technique: m for m in group.members}
     winner = preferred_technique(by_tech)
@@ -229,14 +313,24 @@ def literal_confidence(group: AlignedSegmentGroup) -> float:
     else:
         score -= ALL_OCR_PENALTY
 
-    # character class of the widest material disagreement
+    # character class of the widest material disagreement — group-aware materiality:
+    # a case-only difference between two native extractors counts as material here
+    # (block brief §3) so it flows through the normal material-confidence path. The
+    # formula weights below are unchanged; only which pairs are "material" changed.
     worst = "none"
     for i in range(len(members)):
         for j in range(i + 1, len(members)):
-            if is_material(members[i].text, members[j].text):
-                cls = _material_char_class(members[i].text, members[j].text)
-                if DIFF_CLASS_PENALTY.get(cls, 0.0) >= DIFF_CLASS_PENALTY.get(worst, 0.0):
-                    worst = cls
+            a, b = members[i].text, members[j].text
+            cls = classify_diff(a, b)
+            material = cls == _DIFF_MATERIAL or (
+                cls == _DIFF_CASE
+                and _is_native(members[i].technique)
+                and _is_native(members[j].technique)
+            )
+            if material:
+                cc = _material_char_class(a, b)
+                if DIFF_CLASS_PENALTY.get(cc, 0.0) >= DIFF_CLASS_PENALTY.get(worst, 0.0):
+                    worst = cc
     score -= DIFF_CLASS_PENALTY.get(worst, 0.0)
 
     ocr_confs = [
