@@ -7,11 +7,8 @@ requires-python = ">=3.12"
 license = { text = "MIT" }
 
 # Phased dependency installation (T002 + T046, 7-day supply-chain rule).
-# T002 declares and installs ONLY the Phase 1-2 set. Every pin below was published
-# more than 7 days before the run date (2026-09-07).
-# `docling` and its transitive closure (torch / Hugging Face / docling-*) are NOT
-# declared here — they are added to [project.dependencies] and installed +
-# supply-chain-validated by T046, immediately before path A's first use.
+# T002 declared and installed ONLY the Phase 1-2 set. Every pin below (T002 set) was
+# published more than 7 days before the T002 run date (2026-09-07).
 dependencies = [
     "pdfplumber==0.11.10",
     "pypdfium2==5.13.0",
@@ -26,6 +23,20 @@ dependencies = [
     "numpy==2.5.2",          # RapidOcrEngine: page image -> ndarray for PP-OCR
     "pillow==12.3.0",        # both OCR adapters: PIL.Image open/normalise
     "onnxruntime==1.29.0",   # inference runtime the RapidOCR path executes on
+    # T046 (2026-09-09) — extraction path A. `docling-slim` (import name `docling`) is the
+    # actual Docling package since 2.92.0; the `docling` PyPI name is now a thin metapackage
+    # equal to `docling-slim[standard]` (same code, same version). `standard` pulls unrelated
+    # extras this project rejects (a second RapidOCR distribution, CLI/service-client,
+    # office/email/web backends, chunking). `format-pdf` + `models-local` + `convert-core`
+    # is the minimal extras set that yields the PDF backend (docling-parse) and the local
+    # layout/table-structure models path A needs, with NO OCR extra of any kind (`do_ocr`
+    # is also set to False at runtime — see extract/docling_path.py). Resolved with
+    # `--exclude-newer 2026-09-02T00:00:00Z` (7 days before this run date, 2026-09-09) —
+    # every newly-resolved package in the closure (docling-core, docling-parse,
+    # docling-ibm-models, torch, torchvision, transformers, huggingface-hub, tokenizers,
+    # regex, latex2mathml, filelock, …) is >=7 days old at that cutoff; none required a
+    # hand-pinned exception. Full resolution + ledger: plan.md Justified-Dependency Ledger.
+    "docling-slim[format-pdf,models-local,convert-core]==2.124.0",
 ]
 
 [project.scripts]

@@ -256,6 +256,11 @@ output/
 # Local Ollama data
 .ollama/
 
+# Docling path-A model artifacts (T046) — fetched at setup time by
+# scripts/fetch_docling_models.py; not committed. Tracked reproducibility record:
+# scripts/docling_models/README.md + SHA256SUMS + scripts/fetch_docling_models.py.
+.docling_models/
+
 # Application-generated validation reports
 *.validation.txt
 
