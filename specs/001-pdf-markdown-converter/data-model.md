@@ -244,7 +244,7 @@ recompute the **current** `run_id` after resolutions change, without re-promptin
 | Field | Type | Notes |
 |---|---|---|
 | envelope | — | its `run_id` is the run's `run_id` **at write time** (may be recomputed higher by `review`) |
-| `extract_output_affecting_config` | object | the **extract-stage** subset of research §14: `{ocr_engine, ocr_languages_override, ocr_confidence_threshold, reconcile_confidence_threshold, enabled_extraction_paths, llm_model?, llm_decode?}` — `canonical_json` of these + the envelope `source_sha256` / `page_selection` / `tool_version` + the current `applicable_resolution_digest` ⇒ `run_id` (research §14). |
+| `extract_output_affecting_config` | object | the **extract-stage** subset of research §14: `{ocr_engine, ocr_languages_override, ocr_confidence_threshold, reconcile_confidence_threshold, enabled_extraction_paths, llm_model?, llm_decode?}` — `canonical_json` of these + the envelope `source_sha256` / `page_selection` / `tool_version` + the current **scoped** `applicable_resolution_digest(source_sha256=…, config_subset=this object)` (H1 — never the no-argument whole-store digest) ⇒ `run_id` (research §14). |
 
 Deterministic; no wall-clock. `review` never mutates it.
 
@@ -273,7 +273,9 @@ the old file or the new complete file, never a torn line (M3).
 **Currently-applicable decision** for an `applicability_key` = **the valid record with the greatest
 `sequence_index`** for that key. The store loader enforces I1–I6 (research §22.2) and **fails
 closed** for a key whose chain is invalid (raises it fresh; never guesses). `replay` and
-`applicable_resolution_digest` use exactly the currently-applicable set. The full previous →
+`applicable_resolution_digest` use exactly the currently-applicable set; for **run identity**
+the digest call is always **scoped** to the run's `source_sha256` + config subset (H1) — a
+currently-applicable record for another source or an incompatible config folds in nothing. The full previous →
 replacement → currently-applicable chain (each with its run context) is recoverable by walking
 `sequence_index` / `supersedes` — the append-only audit history FR-076 requires.
 

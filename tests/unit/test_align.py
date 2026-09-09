@@ -265,3 +265,168 @@ def test_iou_helper_and_token_jaccard_helper_are_pure():
     assert align.iou(_A_DOCLING, _B_DOCLING) == 0.0
     assert align.token_jaccard("foo bar baz", "foo bar baz") == 1.0
     assert align.token_jaccard("foo bar", "baz qux") == 0.0
+
+
+# --------------------------------------------------------------------------------------
+# cross-technique coverage corroboration (§21a) — the coarse/fine duplication defect
+# --------------------------------------------------------------------------------------
+#
+# One technique emits a coarse segment covering a region; another emits finer segments
+# for the same content. IoU (coarse vs each fine) is below the threshold, so without a
+# coverage rule all of them survive as single-member groups and the same source text is
+# accepted twice. A coarse group is folded into the finer run ONLY when their comparison
+# keys concatenate (single space, re-normalised) to the coarse comparison key.
+
+# coarse region: one wide box; two finer boxes tile most of it, left then right.
+# (each fine box's IoU against the coarse box stays < 0.5 so ordinary grouping leaves
+# them as independent single-member groups — the exact defect shape.)
+_COARSE = (100.0, 100.0, 400.0, 118.0)
+_FINE_L = (105.0, 100.0, 240.0, 118.0)
+_FINE_R = (250.0, 100.0, 395.0, 118.0)
+_FINE_TEXT_L = "Cláusula 4ª"
+_FINE_TEXT_R = "— do objeto"
+_COARSE_TEXT = "Cláusula 4ª — do objeto"
+
+
+def _coarse_fine_candidates(*, coarse_tech="pdfplumber", fine_tech="docling",
+                            coarse_text=_COARSE_TEXT, fine_l=_FINE_TEXT_L,
+                            fine_r=_FINE_TEXT_R):
+    coarse = _cand(coarse_tech, [
+        _seg("c1", 1, _COARSE, coarse_text, 0, technique=coarse_tech),
+    ])
+    fine = _cand(fine_tech, [
+        _seg("f1", 1, _FINE_L, fine_l, 0, technique=fine_tech),
+        _seg("f2", 1, _FINE_R, fine_r, 1, technique=fine_tech),
+    ])
+    return coarse, fine
+
+
+def _accepted_texts(groups):
+    """Every literal that would enter the CED once at fine granularity: one per group,
+    corroborations contribute a technique, not a second accepted segment."""
+    out = []
+    for g in groups:
+        out.append(g.members[0].text if len(g.members) == 1 else
+                   tuple(m.text for m in g.members))
+    return out
+
+
+def test_coarse_segment_covered_by_finer_run_is_not_an_independent_group():
+    align = _align_mod()
+    groups = align.align(list(_coarse_fine_candidates()))
+    # the coarse pdfplumber segment is gone as its own group; the two docling segments
+    # remain, each carrying the coarse member as coverage evidence.
+    assert _member_set(groups) == {
+        frozenset({("docling", "f1")}),
+        frozenset({("docling", "f2")}),
+    }
+    for g in groups:
+        assert len(g.corroborations) == 1
+        c = g.corroborations[0]
+        assert c.technique == "pdfplumber" and c.segment_id == "c1"
+        assert c.text == _COARSE_TEXT
+        assert set(c.covers_group_ids) == {gg.group_id for gg in groups}
+    # source text is represented exactly once, verbatim, at the finer granularity
+    assert sorted(_accepted_texts(groups)) == sorted([_FINE_TEXT_L, _FINE_TEXT_R])
+
+
+def test_coverage_requires_exact_comparison_key_concatenation():
+    align = _align_mod()
+    joined = f"{_FINE_TEXT_L} {_FINE_TEXT_R}"
+    # coarse comparison key == finer keys joined by a single space -> covered
+    covered = align.align(list(_coarse_fine_candidates(coarse_text=joined)))
+    assert all(g.corroborations for g in covered) and len(covered) == 2
+    # extra whitespace in the coarse literal is comparison-only noise -> still covered
+    spaced = f"  {_FINE_TEXT_L}   {_FINE_TEXT_R}  "
+    noisy = align.align(list(_coarse_fine_candidates(coarse_text=spaced)))
+    assert all(g.corroborations for g in noisy) and len(noisy) == 2
+
+
+def test_coverage_works_in_the_reverse_technique_arrangement():
+    align = _align_mod()
+    groups = align.align(list(
+        _coarse_fine_candidates(coarse_tech="docling", fine_tech="pdfplumber")
+    ))
+    assert _member_set(groups) == {
+        frozenset({("pdfplumber", "f1")}),
+        frozenset({("pdfplumber", "f2")}),
+    }
+    assert {g.corroborations[0].technique for g in groups} == {"docling"}
+
+
+def test_geometric_containment_without_text_match_stays_separate():
+    align = _align_mod()
+    groups = align.align(list(
+        _coarse_fine_candidates(coarse_text="a completely unrelated heading string")
+    ))
+    # coarse survives as its own group; no corroboration is recorded anywhere
+    assert _member_set(groups) == {
+        frozenset({("pdfplumber", "c1")}),
+        frozenset({("docling", "f1")}),
+        frozenset({("docling", "f2")}),
+    }
+    assert all(not g.corroborations for g in groups)
+
+
+def test_partial_textual_overlap_stays_separate():
+    align = _align_mod()
+    groups = align.align(list(
+        _coarse_fine_candidates(coarse_text=f"{_COARSE_TEXT} e das obrigações")
+    ))
+    assert len(groups) == 3
+    assert all(not g.corroborations for g in groups)
+
+
+def test_coverage_never_removes_content_the_finer_run_does_not_reproduce():
+    align = _align_mod()
+    # the finer run is missing a trailing token that only the coarse segment carries
+    groups = align.align(list(_coarse_fine_candidates(
+        coarse_text=f"{_COARSE_TEXT} e das obrigações", fine_r=_FINE_TEXT_R,
+    )))
+    all_text = " ".join(sorted(str(t) for t in _accepted_texts(groups)))
+    assert "e das obrigações" in all_text  # unique coarse content is still present
+    assert any(g.members[0].text == f"{_COARSE_TEXT} e das obrigações"
+               for g in groups if len(g.members) == 1)
+
+
+def test_non_contiguous_finer_segments_are_not_treated_as_coverage():
+    align = _align_mod()
+    # a docling segment sits (in reading order) between the two covered ones but lies
+    # OUTSIDE the coarse box -> the contained indices are not contiguous
+    coarse, _ = _coarse_fine_candidates()
+    fine = _cand("docling", [
+        _seg("f1", 1, _FINE_L, _FINE_TEXT_L, 0, technique="docling"),
+        _seg("mid", 1, (100.0, 400.0, 400.0, 418.0), "far below", 1, technique="docling"),
+        _seg("f2", 1, _FINE_R, _FINE_TEXT_R, 2, technique="docling"),
+    ])
+    groups = align.align([coarse, fine])
+    assert any(len(g.members) == 1 and g.members[0].segment_id == "c1" for g in groups)
+    assert all(not g.corroborations for g in groups)
+
+
+def test_coverage_is_deterministic_under_candidate_and_segment_reordering():
+    align = _align_mod()
+    coarse, fine = _coarse_fine_candidates()
+    fine_rev = _cand("docling", [
+        _seg("f2", 1, _FINE_R, _FINE_TEXT_R, 1, technique="docling"),
+        _seg("f1", 1, _FINE_L, _FINE_TEXT_L, 0, technique="docling"),
+    ])
+    a = align.align([coarse, fine])
+    b = align.align([fine, coarse])
+    c = align.align([fine_rev, coarse])
+    assert _member_set(a) == _member_set(b) == _member_set(c)
+    assert [g.group_id for g in a] == [g.group_id for g in b] == [g.group_id for g in c]
+    for g in a:
+        assert g.corroborations and g.corroborations[0].segment_id == "c1"
+
+
+def test_a_one_to_one_same_region_pair_is_left_to_ordinary_iou_grouping():
+    align = _align_mod()
+    # a single finer segment equal to the coarse one is NOT a coverage relationship
+    coarse = _cand("pdfplumber", [_seg("c1", 1, _COARSE, _COARSE_TEXT, 0)])
+    fine = _cand("docling", [_seg("f1", 1, _COARSE, _COARSE_TEXT, 0, technique="docling")])
+    groups = align.align([coarse, fine])
+    # identical bbox + text -> ordinary IoU makes one two-member group, no corroboration
+    assert len(groups) == 1
+    assert {m.technique for m in groups[0].members} == {"pdfplumber", "docling"}
+    assert not groups[0].corroborations

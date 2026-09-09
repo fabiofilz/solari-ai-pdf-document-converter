@@ -499,7 +499,11 @@ and no network egress occurred.
   a party name): removal is conservative; when ambiguous the element is kept and
   the decision is recorded.
 - **Legitimate hyphen at a line end** (a compound term): not removed when joining
-  the line break.
+  the line break. **v1 policy (research §27, authoritative): keep the trailing
+  hyphen by default; remove it only when the joined token — the two fragments with
+  the boundary hyphen deleted — occurs elsewhere in the same document as a complete
+  token, and the structural guards hold. No dictionary, no LLM. Ambiguous ⇒ keep
+  the hyphen; validation may flag it later.**
 - **Document with no detectable headings**: produced as a flat structure; not
   fabricated hierarchy.
 - **Table that starts mid-page after other content, or spans more than two
@@ -1059,7 +1063,15 @@ reconciliation. FR-015 governs reading order, which is reconciled evidence
 - **FR-013**: The system MUST remove visual line wrapping so that logical
   paragraphs are contiguous.
 - **FR-014**: The system MUST repair hyphenation introduced by line breaks by
-  rejoining split words, without removing hyphens that are part of the word.
+  rejoining split words, without removing hyphens that are part of the word. The
+  repair is **conservative and deterministic (research §27, authoritative)**: the
+  trailing hyphen is kept by default and removed only on **positive
+  document-internal evidence** — the un-hyphenated joined token occurs elsewhere in
+  the same Canonical Extracted Document as a complete token — together with the
+  §27 structural guards. No external dictionary, no language model. When the
+  evidence is insufficient or ambiguous the hyphen is retained (a later validation
+  check may flag it); Stage 3 never guesses. Every removal is recorded as a
+  `dehyphenate` transform in the RenderMap.
 - **FR-015**: Reading order MUST be treated as **independent extraction evidence**,
   not as part of literal-text correctness. Each extraction technique produces its
   own **candidate reading order** over its source-backed segments; two techniques

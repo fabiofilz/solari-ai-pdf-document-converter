@@ -146,9 +146,15 @@ def write_record(path_stem: str | os.PathLike[str], model: Any, *, emit_md: bool
     + ext)``), never via ``Path.with_suffix()`` — a stem that itself contains a dot
     (e.g. the candidate naming shape ``<base>.candidate.<technique>``, T051) would
     otherwise have its trailing dotted segment silently replaced instead of a new
-    extension being appended."""
+    extension being appended.
+
+    Serialisation is ``by_alias=True`` so a field whose schema/contract name differs
+    from its Python identifier (e.g. the CED ``page_classes[].class`` — Python
+    ``class_``) is persisted under the **contract** name. Fields without an alias are
+    unchanged; ``by_alias`` does not reorder keys, so the deterministic canonical bytes
+    are preserved. Models validate either name back (``populate_by_name=True``)."""
     stem = Path(path_stem)
-    json_bytes = model.model_dump_json(indent=2).encode("utf-8") + b"\n"
+    json_bytes = model.model_dump_json(indent=2, by_alias=True).encode("utf-8") + b"\n"
     written = [write_atomic(stem.with_name(stem.name + ".json"), json_bytes)]
     if emit_md:
         md_path = stem.with_name(stem.name + ".md")

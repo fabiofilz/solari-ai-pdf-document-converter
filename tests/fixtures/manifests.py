@@ -254,8 +254,14 @@ DEFECT_GROUND_TRUTH: list[DefectCase] = [
 
 ALLOWED_TRANSFORMS: list[AllowedCase] = [
     AllowedCase("clean-1", "clean_transform.pdf", "reflow",
-                "hard-wrapped lines joined into one paragraph; line-break hyphens repaired, "
-                "compound hyphen kept"),
+                "hard-wrapped lines joined into one paragraph; the compound hyphen "
+                "('com-pound-word') is kept. Per the pinned conservative v1 de-hyphenation "
+                "policy (research §27) a line-break hyphen is removed ONLY when the "
+                "un-hyphenated joined token is attested elsewhere in the same document as a "
+                "complete token; this fixture's wrapped tokens ('hardwrapped', 'linebreak') "
+                "are NOT attested, so those line-break hyphens are RETAINED (a later "
+                "validation check may flag them). T066 owns any fixture that needs a "
+                "positive de-hyphenation case."),
     AllowedCase("clean-2", "clean_transform.pdf", "heading_inference",
                 "'Section Title' correctly promoted to a heading"),
     AllowedCase("clean-3", "clean_transform.pdf", "clause_reconstruction",

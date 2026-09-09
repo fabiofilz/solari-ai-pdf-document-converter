@@ -92,7 +92,10 @@ def build_canonical(
                 segment_id=rep.segment_id,
                 text=d.selected["value"],  # verbatim; SC-020 for automatic decisions
                 source=rep.source,
-                contributing_techniques=sorted({m.technique for m in g.members}),
+                contributing_techniques=sorted(
+                    {m.technique for m in g.members}
+                    | {c.technique for c in g.corroborations}  # §21a coverage evidence
+                ),
                 decision=AcceptedDecision(method=d.method, decision_id=d.decision_id),
             )
         )
@@ -101,8 +104,11 @@ def build_canonical(
     for g in groups:
         rep_id = reps[g.group_id].segment_id
         seen: set[tuple[Any, ...]] = set()
-        for m in g.members:
-            for h in hints_by_seg.get(m.segment_id, []):
+        hint_segment_ids = [m.segment_id for m in g.members] + [
+            c.segment_id for c in g.corroborations  # §21a: coarse member's hints kept
+        ]
+        for sid in hint_segment_ids:
+            for h in hints_by_seg.get(sid, []):
                 sig = (h.kind, h.level, h.source_technique, canonical_json(h.payload))
                 if sig in seen:
                     continue

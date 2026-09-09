@@ -16,7 +16,12 @@ current-resolution + I1–I6 + crash durability), §22.4 (authorization = `run_i
 match only, audit-event not deterministic-core), §22.8 (prompt-layer invariants),
 §25 (`segment_transforms` model, `not_located` nullability, root-cause defect
 class, reading-order invariant, Markdown serialization, `<base>.md` publication
-gate).
+gate). **2026-09-09 (pre-semantic audit remediation)**: §21a′ added (deterministic
+cross-technique coverage corroboration in `align.py` — closes the coarse/fine
+double-accept before it can reach the CED); §14 clarified that run-identity
+recomputation uses the **scoped** `applicable_resolution_digest(source_sha256=…,
+config_subset=…)` only (H1); §27 added (authoritative conservative v1
+de-hyphenation policy — pinned so T066/T067 can be encoded test-first).
 
 **Open items requiring evidence or a later decision:**
 - **§4 — OCR engine** (Tesseract 5 vs RapidOCR/PP-OCR): **RESOLVED (corrected benchmark, 2026-09-07)** → **Tesseract 5** is the single global default. The corrected T013 run gives RapidOCR its multilingual **Latin** recognition model and scores PT/EN/ES separately; Tesseract clears the §4.1 per-language acceptance floor for all three, RapidOCR is materially worse for all three. Evidence: `benchmarks/ocr/RESULTS.md`.
@@ -545,13 +550,27 @@ resolution store, and derives the *current* `run_id`. A config change between ru
 different `run_id` ⇒ any prior authorization no longer matches. No second run-identity definition
 exists.
 
+**The digest call for run identity is always the *scoped* one (H1 — 2026-09-09 audit
+remediation).** Run-identity recomputation (T136/T137: `run_identity.recompute_run_id`, and the
+equivalent fold inside `extract`) MUST call
+`ResolutionStore.applicable_resolution_digest(source_sha256=<the run's source SHA256>,
+config_subset=<the run's applicability / effective-config subset>)`. It MUST **not** call the
+no-argument whole-store form: that folds *every* currently-applicable resolution regardless of
+which document or config it belongs to, so an unrelated document's resolution in the same store
+would perturb this run's `run_id`. The scoped call is defined in `resolutions.py` — it keeps a
+currently-applicable record only when its envelope `source_sha256` matches **and** recomputing its
+applicability key under the given config subset reproduces its stored key, and it **fails closed**
+(a record whose applicability cannot be reproduced is dropped, never folded). The no-argument form
+of `applicable_resolution_digest()` is retained only for diagnostics / the store's own `.md`
+rendering; it is never an input to `run_id`.
+
 `applicable_resolution_digest` (FR-053a / FR-071) folds in every `human_confirmed` resolution the
 run actually replayed: for each, its applicability key and its selected value / ordering. So
 `(source, config, applicable resolutions)` fully determines the bytes — resolving a review item
 and re-running changes the digest and yields a new, still-reproducible artifact; an unchanged
 re-run replays the same resolutions and is a byte-identical no-op. Resolutions that exist in the
 store but do **not** apply to this run (different source hash, incompatible config) contribute
-nothing.
+nothing — the scoped digest call is what enforces this.
 
 With identical inputs every artifact (`original Markdown`, `DOCX`, and all four records) is
 byte-identical across runs, so a re-run is a satisfied no-op rather than a spurious collision
@@ -766,6 +785,39 @@ alignment groups segments that describe the same region by geometric overlap (bb
 configured threshold) plus normalized-text similarity (token Jaccard) as a tie-break. Output:
 `AlignedSegmentGroup`s, each holding 1–3 candidate segments. A group with segments from only one
 candidate is still a group (that candidate is the sole evidence there).
+
+**a′. Cross-technique coverage corroboration (`align.py`, deterministic — 2026-09-09 audit
+remediation).** IoU one-to-one grouping does not relate a **coarse** segment from one technique
+(a pdfplumber line, a Docling block) to the **finer** segments another technique emitted for the
+*same* source text — the coarse box's IoU against each finer box is below the threshold, so the
+coarse group and every finer group survive as independent single-member groups and the shared
+source text is accepted **twice** in the CED. Alignment closes this **narrowly**, as evidence and
+never as a rewrite:
+
+- a coarse **single-member** group *C* (technique *tC*, page *p*) is folded into a contiguous run
+  *F₁…Fₙ* (n ≥ 2) of **single-member** groups from **one other** technique *tF* on the **same
+  physical page** — recorded as a `CoverageCorroboration` on **each** `Fᵢ` — only when **all** of:
+  1. the run is contiguous in *tF*'s own **candidate reading order** (`reading_order_index`), and
+     that order is uniquely supported (no repeated index) — otherwise no suppression;
+  2. every `Fᵢ` bbox is geometrically **contained** in *C*'s region (small fixed epsilon), and the
+     union of the `Fᵢ` boxes spans a strong fraction of *C*'s area (a coarse box materially larger
+     than the run may hold unrelated content → not coverage);
+  3. no *tF* group **outside** the run is contained in *C* (the run is *all* of *tF* inside *C*);
+  4. the **comparison keys** are equivalent: `comparison_key(C)` equals the `comparison_key(Fᵢ)`
+     values joined by exactly one U+0020 between non-empty parts and re-normalised with the same
+     comparison-key rule (§21b) — a **comparison-only** test; no literal is built or stored from
+     the join, the finer stored values are untouched;
+  5. each `Fᵢ` participates in **at most one** such relationship.
+- *C* is then **not** returned as its own `AlignedSegmentGroup`. It does **not** vanish: its
+  technique appears in every covered `AcceptedSegment.contributing_techniques`, and its verbatim
+  text / `SourceRef` / `segment_id` are carried on the `CoverageCorroboration`. Literal and
+  reading-order reconciliation read `members` only — corroborations never enter a decision.
+- **Fail conservative.** Any doubt — comparison keys differ, only a substring matches, numeric or
+  punctuation differences survive §21b, the run is not contiguous, geometry spans extra content,
+  or the finer order is ambiguous — keeps *C* independent. A false-negative (two representations
+  kept, later flagged by validation) is always preferred to a false-positive removal. Semantic
+  reflow / dehyphenation / dictionaries / fuzzy similarity are **never** used to establish
+  equivalence; `align.py` stays a grouper.
 
 **b. Literal-content reconciliation (`literal.py`).** Per group:
 - normalize each candidate's text for **comparison only** (whitespace collapse, Unicode NFC, quote
@@ -1219,7 +1271,7 @@ recorded as an **ordered, typed** list on the RenderMap for that segment. This i
 
 | kind | stage | permitted by | effect |
 |---|---|---|---|
-| `dehyphenate` | 3 | FR-014 | remove a trailing `-` + intra-segment line break, joining the word |
+| `dehyphenate` | 3 | FR-014 | remove a trailing U+002D + line break, joining the word — **only** on the positive document-internal evidence pinned in §27 (default: keep the hyphen); the transform names the attesting token occurrence |
 | `reflow_whitespace` | 3 | FR-013 / FR-016 | collapse an intra-segment hard line break to a single space |
 | `markdown_escape` | 5 | renderer contract (FR-012 output) | escape Markdown-significant chars the value contains so they render literally (`\|` in a pipe cell; a leading `#`/`>`/`-`/`*`/`+`/`_`/`1.` at a line start; `` ` ``) |
 | `html_escape` | 5 | FR-020–FR-022 (HTML `<table>` path) | `&`→`&amp;`, `<`→`&lt;`, `>`→`&gt;` inside an HTML table cell |
@@ -1433,6 +1485,73 @@ Markdown, the verification results (§25.5), and the validation report. The repo
 - *A dedicated JSON schema for the Markdown report*: rejected — the authoritative structured data
   is `human-review-verification.schema.json`; the `.md` is a rendering of it (instruction:
   "render Markdown from one authoritative machine model").
+
+---
+
+## 27. Stage-3 de-hyphenation policy (v1)  *(AUTHORITATIVE — 2026-09-09 audit remediation)*
+
+> Pinned **before** T066/T067 so the de-hyphenation transform can be encoded test-first and
+> unambiguously. This section is the single authority for when `transform/reflow.py` may remove a
+> line-boundary hyphen; FR-014 and the `dehyphenate` row of §25.2 reference it. Stage 3 only — it
+> operates on the CED in `accepted_reading_order`, never during extraction or reconciliation, and
+> the CED literal is never mutated in place (a removal is a recorded `SegmentTransform`, §25.2).
+
+**Default: keep the hyphen.** A trailing U+002D HYPHEN-MINUS at a visual line boundary is
+**preserved**. It is *not* removed merely because it sits at the end of a rendered line.
+
+**Removal requires positive, deterministic, document-internal evidence.** A trailing U+002D may be
+removed and the two fragments joined **only** when the **joined token — the two fragments
+concatenated with the boundary hyphen deleted and nothing else — occurs elsewhere in the *same
+CED* as a complete token** (whitespace-/punctuation-delimited, compared under the §21b
+comparison-key normal form, case-insensitively for this lookup only). This is the *only* accepted
+positive lexical signal for v1. **No external dictionary, no LLM, no network/service, no
+statistical language model, no morphological guesser.**
+
+**Structural preconditions — all must also hold** (they gate, they never substitute for the
+lexical evidence):
+
+- the next fragment is the **immediately following segment in accepted reading order**;
+- both fragments share a compatible paragraph / line context (same block candidate; not across a
+  heading, list-item, table-cell, or caption boundary that forbids the join);
+- **same physical page** (v1 does not join across a page break — no existing rule permits it);
+- same logical column / band (the §21c band model);
+- the fragment **before** the hyphen ends with **at least two** Latin-script letters;
+- the fragment **after** the hyphen **begins with a lowercase Latin-script letter**;
+- the boundary character is **exactly U+002D** — never U+2010/U+2011/U+2012/U+2013/U+2014 (en/em/
+  figure dashes) and never a soft hyphen U+00AD (already comparison-only noise, never a stored
+  join trigger);
+- the hyphen is **not** part of a legal numbering / range / dash pattern — not preceded by a digit
+  or a space in a construct like `12-`, `A-`, `1998-`, `pp. 3-`;
+- no table / list / heading envelope forbids merging the two fragments' segments;
+- if either fragment is OCR-derived **below** the accepted OCR-confidence condition, stay
+  conservative — **keep the hyphen**.
+
+**Ambiguous or insufficient evidence ⇒ keep the hyphen.** Stage 3 never guesses. A retained
+line-boundary hyphen that a human considers wrong is a **validation** finding later (FR-034a), not
+a Stage-3 repair.
+
+**Compound / lexical hyphens are always kept** — `IGP-M`, `compound-word`, `e-mail`, hyphenated
+surnames. The rule above only *ever* removes a hyphen when the un-hyphenated joined form is
+independently attested in the document; a genuine compound almost never is.
+
+**Audit.** Every removal records a `dehyphenate` `SegmentTransform` (§25.2, `stage: 3`,
+`permitted_by: FR-014`) against the affected source segment(s), naming the segment it was joined
+with and the attesting complete-token occurrence (segment id + span) that supplied the evidence.
+No silent literal change: the RenderMap chain must explain the delta between the CED literal and
+the rendered bytes.
+
+**Fixture expectations.** A fixture or manifest that expected a line-break hyphen removed *without*
+this positive document-internal evidence has its expected-transform note updated to "hyphen
+retained (no in-document attestation of the joined token)" — the rule is not weakened to match an
+old fixture. `clean_transform.pdf` is annotated accordingly (`tests/fixtures/manifests.py`).
+
+**Alternatives considered.**
+- *Bundled word list / spell checker*: rejected — a dependency, a locale surface, and a second
+  source of truth about "is this a word"; also defeats the local-first / deterministic-bytes
+  guarantee across environments.
+- *Always de-hyphenate at a line end, keep only doubled hyphens*: rejected — silently corrupts
+  compounds and legal identifiers (`IGP-M` → `IGPM`), the exact failure FR-014 calls out.
+- *LLM judgement on each boundary*: rejected — Stage 3 has no LLM (T074); it would author text.
 
 ---
 

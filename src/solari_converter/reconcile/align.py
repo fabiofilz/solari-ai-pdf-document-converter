@@ -22,6 +22,20 @@ Frozen grouping rules
   under segment ordering within a candidate — every decision is driven by a total sort
   on ``(page, rounded bbox, technique, segment_id)``, never on input position.
 
+Cross-technique coverage corroboration (post-clustering)
+-------------------------------------------------------
+
+IoU one-to-one grouping treats a *coarse* segment from one technique (a pdfplumber
+line, a Docling block) and the *finer* segments another technique emitted for the same
+source region as unrelated single-member groups — so both are accepted and the same
+source text lands in the CED twice. :func:`align` closes this **narrowly**: a coarse
+single-member group is recorded as :class:`CoverageCorroboration` on a contiguous run
+of **two or more** finer single-member groups from another technique — and is **not**
+returned as its own group — only when their concatenated *comparison keys* are byte-equal
+under the pinned join rule (research §21a). This is **coverage evidence, never dedup**:
+no literal is rewritten, the finer stored values are untouched, and any doubt keeps the
+coarse group independent (§21a "fail conservative").
+
 What alignment must **not** do (it only groups): dehyphenate, strip, normalise or
 rewrite any candidate value; reconstruct paragraphs; infer headings; apply structural
 hints; make any reconciliation decision. ``segment_id`` — which is text-derived and
@@ -35,8 +49,9 @@ from __future__ import annotations
 
 import hashlib
 import unicodedata
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from solari_converter.model.candidate import ExtractionCandidate
 from solari_converter.model.provenance import BBox, SourceRef
@@ -44,7 +59,11 @@ from solari_converter.model.provenance import BBox, SourceRef
 __all__ = [
     "IOU_THRESHOLD",
     "JACCARD_TIEBREAK_THRESHOLD",
+    "COVERAGE_CONTAINMENT_EPSILON",
+    "COVERAGE_UNION_MIN_AREA_FRACTION",
+    "COVERAGE_KEY_JOIN_SEPARATOR",
     "AlignedMember",
+    "CoverageCorroboration",
     "AlignedSegmentGroup",
     "iou",
     "token_jaccard",
@@ -68,6 +87,21 @@ _IOU_TIE_EPSILON: float = 1e-6
 #: bbox rounding for the deterministic sort key (sub-pixel jitter must not reorder).
 _BBOX_SORT_NDIGITS: int = 3
 
+# --- coverage-corroboration guards (§21a; NOT Config; run identity unchanged) --------
+
+#: A finer segment's bbox must sit within the coarse region expanded by this many PDF
+#: units on every side to count as geometrically contained by it.
+COVERAGE_CONTAINMENT_EPSILON: float = 1.5
+
+#: The union of the covered finer segments' bboxes must span at least this fraction of
+#: the coarse region's area. A coarse box materially larger than the finer run may hold
+#: unrelated content, so it is not treated as corroborated coverage (§21a §7).
+COVERAGE_UNION_MIN_AREA_FRACTION: float = 0.55
+
+#: The single deterministic structural separator inserted between non-empty finer
+#: comparison keys before the equivalence check (§21a "separator/comparison rule").
+COVERAGE_KEY_JOIN_SEPARATOR: str = " "
+
 
 # --- public value types -------------------------------------------------------------
 
@@ -84,16 +118,41 @@ class AlignedMember:
 
 
 @dataclass(frozen=True)
+class CoverageCorroboration:
+    """A coarser single-technique segment whose literal content is reproduced exactly,
+    in source-supported order, by a contiguous run of finer segments from another
+    technique (§21a). It is recorded on **each** finer group it covers instead of
+    becoming its own independently accepted CED segment.
+
+    Audit trail: the coarse member's technique still appears in every covered group's
+    ``contributing_techniques``, and its verbatim ``text`` / ``source`` / ``segment_id``
+    are preserved here — the coarse member is represented through the finer groups, it
+    does not vanish.
+    """
+
+    technique: str
+    segment_id: str
+    text: str
+    source: SourceRef
+    reading_order_index: int
+    covers_group_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class AlignedSegmentGroup:
     """The cross-candidate correspondence unit (data-model.md Layer 2). 1–3 members.
 
     Internal — embedded in the reconciliation log, never persisted on its own.
+    ``corroborations`` is additive coverage evidence (§21a): finer groups that stand in
+    for a coarser competing segment carry it; it never participates in literal or
+    reading-order reconciliation (those read ``members`` only).
     """
 
     group_id: str
     physical_page: int
     region_bbox: BBox
     members: tuple[AlignedMember, ...]
+    corroborations: tuple[CoverageCorroboration, ...] = ()
 
 
 # --- geometry / text helpers (pure) -------------------------------------------------
@@ -220,6 +279,7 @@ def align(
             clusters[best_idx].append(item)
 
     groups = [_finalise(cluster) for cluster in clusters]
+    groups = _apply_coverage(groups)
     groups.sort(key=lambda g: (g.physical_page, g.region_bbox, g.group_id))
     return groups
 
@@ -271,3 +331,155 @@ def _finalise(cluster: list[_Item]) -> AlignedSegmentGroup:
         region_bbox=region_bbox,
         members=members,
     )
+
+
+# --- cross-technique coverage corroboration (§21a) ---------------------------------
+
+
+def _bbox_area(b: Sequence[float]) -> float:
+    return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+
+def _bbox_contained(inner: Sequence[float], outer: Sequence[float], eps: float) -> bool:
+    return (
+        inner[0] >= outer[0] - eps
+        and inner[1] >= outer[1] - eps
+        and inner[2] <= outer[2] + eps
+        and inner[3] <= outer[3] + eps
+    )
+
+
+def _bbox_union(bboxes: Sequence[Sequence[float]]) -> tuple[float, float, float, float]:
+    return (
+        min(b[0] for b in bboxes),
+        min(b[1] for b in bboxes),
+        max(b[2] for b in bboxes),
+        max(b[3] for b in bboxes),
+    )
+
+
+def _coverage_comparison_key(text: str) -> str:
+    # deferred import: confidence imports this module, so this stays function-local.
+    from solari_converter.reconcile.confidence import comparison_key
+
+    return comparison_key(text)
+
+
+def _coverage_keys_equivalent(coarse_text: str, fine_texts: Sequence[str]) -> bool:
+    """The pinned comparison-only equivalence: the coarse segment's comparison key
+    equals the finer segments' comparison keys joined by exactly one
+    :data:`COVERAGE_KEY_JOIN_SEPARATOR` between non-empty parts, then re-normalised with
+    the same comparison-key rule reconciliation uses. Operates only on comparison keys —
+    no new literal is built or stored (§21a §6)."""
+    coarse = _coverage_comparison_key(coarse_text)
+    parts = [_coverage_comparison_key(t) for t in fine_texts]
+    joined = _coverage_comparison_key(
+        COVERAGE_KEY_JOIN_SEPARATOR.join(p for p in parts if p)
+    )
+    return bool(coarse) and coarse == joined
+
+
+def _technique_reading_order(
+    groups: Sequence[AlignedSegmentGroup], technique: str
+) -> list[AlignedSegmentGroup] | None:
+    """``groups`` that have a member from ``technique``, ordered by that member's
+    candidate ``reading_order_index``. ``None`` when the order is not uniquely supported
+    (a repeated index) — coverage then does not apply (§21a "fail conservative")."""
+    keyed: list[tuple[int, AlignedSegmentGroup]] = []
+    for g in groups:
+        m = next((m for m in g.members if m.technique == technique), None)
+        if m is not None:
+            keyed.append((m.reading_order_index, g))
+    idxs = [k for k, _ in keyed]
+    if len(set(idxs)) != len(idxs):
+        return None
+    return [g for _, g in sorted(keyed, key=lambda t: (t[0], t[1].group_id))]
+
+
+def _apply_coverage(
+    groups: list[AlignedSegmentGroup],
+) -> list[AlignedSegmentGroup]:
+    """Fold each fully-corroborated coarse single-member group into the finer groups
+    that reproduce it (§21a). Deterministic; a fine group participates in at most one
+    coverage relation; nothing is dropped unless its comparison key is reproduced
+    exactly by the retained finer groups."""
+    by_page: dict[int, list[AlignedSegmentGroup]] = defaultdict(list)
+    for g in groups:
+        by_page[g.physical_page].append(g)
+
+    suppressed: set[str] = set()
+    consumed_fine: set[str] = set()
+    added: dict[str, list[CoverageCorroboration]] = defaultdict(list)
+
+    for page in sorted(by_page):
+        page_groups = by_page[page]
+        singles = [g for g in page_groups if len(g.members) == 1]
+        coarse_candidates = sorted(singles, key=lambda g: (g.region_bbox, g.group_id))
+        for coarse in coarse_candidates:
+            if coarse.group_id in suppressed or coarse.group_id in consumed_fine:
+                continue
+            cbox = coarse.region_bbox
+            if _bbox_area(cbox) <= 0.0:
+                continue
+            ctech = coarse.members[0].technique
+            fine_techs = sorted(
+                {
+                    g.members[0].technique
+                    for g in singles
+                    if g.members[0].technique != ctech
+                }
+            )
+            for ftech in fine_techs:
+                ordered = _technique_reading_order(page_groups, ftech)
+                if ordered is None:
+                    continue
+                contained = [
+                    i
+                    for i, g in enumerate(ordered)
+                    if _bbox_contained(g.region_bbox, cbox, COVERAGE_CONTAINMENT_EPSILON)
+                ]
+                if len(contained) < 2:
+                    # the audit defect is a *coarse* segment standing in for **multiple**
+                    # finer ones; a 1:1 same-region pair is ordinary IoU grouping's job.
+                    continue
+                if contained != list(range(contained[0], contained[-1] + 1)):
+                    continue  # not contiguous in this technique's reading order
+                run = ordered[contained[0] : contained[-1] + 1]
+                if any(
+                    len(g.members) != 1
+                    or g.members[0].technique != ftech
+                    or g.group_id in consumed_fine
+                    or g.group_id in suppressed
+                    or g.group_id == coarse.group_id
+                    for g in run
+                ):
+                    continue
+                union = _bbox_union([g.region_bbox for g in run])
+                if _bbox_area(union) < COVERAGE_UNION_MIN_AREA_FRACTION * _bbox_area(cbox):
+                    continue
+                if not _coverage_keys_equivalent(
+                    coarse.members[0].text, [g.members[0].text for g in run]
+                ):
+                    continue
+
+                corr = CoverageCorroboration(
+                    technique=ctech,
+                    segment_id=coarse.members[0].segment_id,
+                    text=coarse.members[0].text,
+                    source=coarse.members[0].source,
+                    reading_order_index=coarse.members[0].reading_order_index,
+                    covers_group_ids=tuple(g.group_id for g in run),
+                )
+                for g in run:
+                    added[g.group_id].append(corr)
+                    consumed_fine.add(g.group_id)
+                suppressed.add(coarse.group_id)
+                break
+
+    out: list[AlignedSegmentGroup] = []
+    for g in groups:
+        if g.group_id in suppressed:
+            continue
+        extra = added.get(g.group_id)
+        out.append(replace(g, corroborations=tuple(extra)) if extra else g)
+    return out
