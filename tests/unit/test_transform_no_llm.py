@@ -72,11 +72,11 @@ def test_no_transform_or_render_module_imports_an_llm_client():
 
 def test_scan_actually_covered_the_stage_three_modules():
     scanned = {p.stem for p in _python_files()}
-    assert {"reflow", "structure", "lists"} <= scanned
+    assert {"reflow", "structure", "lists", "tables"} <= scanned
 
 
 def test_importing_the_transform_modules_loads_no_llm_client():
-    for name in ("reflow", "structure", "lists"):
+    for name in ("reflow", "structure", "lists", "tables"):
         importlib.import_module(f"solari_converter.transform.{name}")
     llm_loaded = [
         m for m in sys.modules
