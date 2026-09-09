@@ -440,17 +440,39 @@ def test_spanning_region_threshold_is_a_module_constant():
 
 
 # --------------------------------------------------------------------------------------
-# T059 — LLM order selection + guard + below-threshold review. RED until Block >= 2.
+# T059 — LLM order selection + guard + below-threshold review (Block 2).
 # --------------------------------------------------------------------------------------
 
 
-class TestFutureOwnerT059:
-    """GREEN owner: **T059** — ``reconcile/llm_select.py`` (NOT in Block 1).
+def _llm_client(srv):
+    from solari_converter.validate.llm_client import LLMClient
 
-    Block 1 deliberately does not create ``reconcile/llm_select.py``; every test here
-    fails at import until T059 lands. They pin: ≥ 0.75 → the LLM selects an **existing**
-    candidate/geometry order; the guard rejects an order that is neither; < 0.75 →
-    reading-order HUMAN_REVIEW_REQUIRED carrying ``segment_ids`` (research §21c/§21d).
+    return LLMClient(base_url=srv.base_url, model="fake", seed=0, retries=0)
+
+
+def _conflicting_high_confidence_page(align):
+    """Four groups sharing one bbox (geometry can't order them) with two full-permutation
+    candidate orders that differ by a single adjacent swap → Kendall-τ small → the
+    disagreement confidence is >= 0.75 (a legitimate LLM-selection case)."""
+    bbox = (100.0, 100.0, 400.0, 140.0)
+    ids = ["a", "b", "c", "d"]
+    doc = {"a": 0, "b": 1, "c": 2, "d": 3}
+    ocr = {"a": 0, "b": 1, "c": 3, "d": 2}  # swap c/d
+    return [
+        _grp(align, gid, bbox, [
+            _member(align, "docling", f"d-{gid}", doc[gid]),
+            _member(align, "ocr:tesseract", f"o-{gid}", ocr[gid]),
+        ])
+        for gid in ids
+    ]
+
+
+class TestT059OrderDispatch:
+    """GREEN owner: **T059** — ``reconcile/llm_select.py`` (Block 2).
+
+    ≥ 0.75 → the LLM selects an **existing** candidate/geometry order; the exact guard
+    rejects an order that is neither; < 0.75 → reading-order HUMAN_REVIEW_REQUIRED, no
+    guess and no LLM call (research §21c / §21d, block brief §3–§6).
     """
 
     def _llm_select(self):
@@ -458,14 +480,54 @@ class TestFutureOwnerT059:
 
         return llm_select
 
-    def test_at_or_above_threshold_llm_selects_an_existing_order(self):
-        self._llm_select()
-        raise AssertionError("T059: selection-only order path not built yet")
+    def test_at_or_above_threshold_llm_selects_an_existing_order(self, fake_llm_server):
+        ls, align = self._llm_select(), _align()
+        srv = fake_llm_server("normal")  # picks option index 0 twice
+        groups = _conflicting_high_confidence_page(align)
+        out = ls.reconcile_order(
+            groups, llm_client=_llm_client(srv), llm_capable=True,
+            confidence_threshold=0.75,
+        )
+        assert out.outcome == "RESOLVED"
+        assert out.method == "llm_selected"
+        assert list(out.selected["order"]) in (
+            ["a", "b", "c", "d"], ["a", "b", "d", "c"],
+        )
+        assert len(srv.requests) == 2  # double (flip-check) call
 
-    def test_guard_rejects_an_order_that_is_neither_candidate_nor_geometry(self):
-        self._llm_select()
-        raise AssertionError("T059: post-LLM order guard not built yet")
+    def test_guard_rejects_an_order_that_is_neither_candidate_nor_geometry(
+        self, fake_llm_server
+    ):
+        ls, align = self._llm_select(), _align()
+        srv = fake_llm_server("returns_non_candidate")
+        out = ls.reconcile_order(
+            _conflicting_high_confidence_page(align),
+            llm_client=_llm_client(srv), llm_capable=True,
+        )
+        assert out.outcome == "HUMAN_REVIEW_REQUIRED"
+        assert out.review_reason == "guard_rejected"
 
-    def test_below_threshold_reading_order_conflict_requires_human_review(self):
-        self._llm_select()
-        raise AssertionError("T059: < 0.75 reading-order HUMAN_REVIEW_REQUIRED not built yet")
+    def test_below_threshold_reading_order_conflict_requires_human_review(
+        self, fake_llm_server
+    ):
+        ls, align = self._llm_select(), _align()
+        srv = fake_llm_server("normal")
+        # two groups, flatly reversed candidate orders, ambiguous geometry → τ = 1.0
+        groups = _ambiguous_disagreeing_page(ls, align)
+        out = ls.reconcile_order(
+            groups, llm_client=_llm_client(srv), llm_capable=True,
+            confidence_threshold=0.75,
+        )
+        assert out.outcome == "HUMAN_REVIEW_REQUIRED"
+        assert out.review_reason == "below_threshold"
+        assert out.segment_ids and set(out.segment_ids) == {"a", "b"}
+        assert srv.requests == []  # the < 0.75 gate is checked BEFORE any LLM call
+
+    def test_deterministic_agreement_never_calls_the_llm(self, fake_llm_server):
+        ls, align = self._llm_select(), _align()
+        srv = fake_llm_server("normal")
+        groups = _linear_page(align, {"docling": (0, 1, 2), "pdfplumber": (0, 1, 2)})
+        out = ls.reconcile_order(groups, llm_client=_llm_client(srv), llm_capable=True)
+        assert out.outcome == "RESOLVED"
+        assert out.method == "deterministic_agreement"
+        assert srv.requests == []

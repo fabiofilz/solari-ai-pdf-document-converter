@@ -341,3 +341,122 @@ def test_the_store_uses_no_database(tmp_path: Path) -> None:
     src = Path(_mod().__file__).read_text(encoding="utf-8")
     for banned in ("import sqlite3", "sqlalchemy", "dbm", "shelve"):
         assert banned not in src
+
+
+# --- H1: scoped applicable_resolution_digest (block brief §12) -----------------
+
+_CFG_A = {
+    "ocr_engine": "tesseract", "ocr_languages_override": None,
+    "ocr_confidence_threshold": 70,
+    "enabled_extraction_paths": ["docling", "pdfplumber", "ocr"],
+}
+_CFG_B = {**_CFG_A, "ocr_confidence_threshold": 85}
+
+
+def _append_matched(
+    store, m, *, source_sha256, config_subset, values, selected, page=5, item="i",
+):
+    """Append a resolution whose ``candidates_presented`` values EXACTLY reproduce the
+    ``candidate_values`` its applicability key was built from (as T061 does)."""
+    key = m.compute_applicability_key(
+        source_sha256=source_sha256, conflict_type="literal_content", physical_page=page,
+        region_bboxes=[[10.0, 20.0, 110.0, 40.0]], candidate_values=list(values),
+        config_subset=config_subset,
+    )
+    store.append(
+        applicability_key=key, review_item_id=item, conflict_type="literal_content",
+        physical_page=page, region_bboxes=[[10.0, 20.0, 110.0, 40.0]],
+        candidates_presented=[
+            {"technique": f"t{i}", "value": v} for i, v in enumerate(values)
+        ],
+        selected=selected, envelope={**_ENV, "source_sha256": source_sha256},
+    )
+    return key
+
+
+_SEL = {"mode": "select", "value": "R$ 1.599,80", "manually_verified": False}
+_ENTERED = {"mode": "entered", "value": "R$ 1.599,80 (fixed)", "manually_verified": True}
+_VALUES = ("R$ 1.599,80", "R$ 1.599.80")
+
+
+def test_h1_unscoped_digest_is_unchanged_and_deterministic(tmp_path: Path) -> None:
+    s = _store(tmp_path)
+    _append_matched(s, _mod(), source_sha256="a" * 64, config_subset=_CFG_A,
+                    values=_VALUES, selected=_SEL)
+    d1 = _store(tmp_path).applicable_resolution_digest()
+    d2 = _store(tmp_path).applicable_resolution_digest()
+    assert d1 == d2 and d1 != _EMPTY_DIGEST
+
+
+def test_h1_a_resolution_from_another_document_does_not_affect_this_digest(
+    tmp_path: Path,
+) -> None:
+    s = _store(tmp_path)
+    _append_matched(s, _mod(), source_sha256="b" * 64, config_subset=_CFG_A,
+                    values=_VALUES, selected=_SEL)
+    # scoped to document "a" + its config: document "b"'s resolution contributes nothing
+    scoped = _store(tmp_path).applicable_resolution_digest(
+        source_sha256="a" * 64, config_subset=_CFG_A
+    )
+    assert scoped == _EMPTY_DIGEST
+    # but the unscoped digest still sees it (backward compatible)
+    assert _store(tmp_path).applicable_resolution_digest() != _EMPTY_DIGEST
+
+
+def test_h1_config_mismatched_resolution_is_excluded_fail_closed(tmp_path: Path) -> None:
+    s = _store(tmp_path)
+    _append_matched(s, _mod(), source_sha256="a" * 64, config_subset=_CFG_A,
+                    values=_VALUES, selected=_SEL)
+    scoped = _store(tmp_path).applicable_resolution_digest(
+        source_sha256="a" * 64, config_subset=_CFG_B  # different threshold
+    )
+    assert scoped == _EMPTY_DIGEST
+
+
+def test_h1_matching_source_and_config_resolution_is_included(tmp_path: Path) -> None:
+    s = _store(tmp_path)
+    _append_matched(s, _mod(), source_sha256="a" * 64, config_subset=_CFG_A,
+                    values=_VALUES, selected=_SEL)
+    scoped = _store(tmp_path).applicable_resolution_digest(
+        source_sha256="a" * 64, config_subset=_CFG_A
+    )
+    assert scoped not in (_EMPTY_DIGEST,)
+    assert scoped == _store(tmp_path).applicable_resolution_digest()  # only record
+
+
+def test_h1_human_entered_resolution_contributes_to_the_scoped_digest(
+    tmp_path: Path,
+) -> None:
+    s = _store(tmp_path)
+    _append_matched(s, _mod(), source_sha256="a" * 64, config_subset=_CFG_A,
+                    values=_VALUES, selected=_ENTERED)
+    scoped = _store(tmp_path).applicable_resolution_digest(
+        source_sha256="a" * 64, config_subset=_CFG_A
+    )
+    assert scoped != _EMPTY_DIGEST
+
+
+def test_h1_scoped_digest_is_order_independent(tmp_path: Path) -> None:
+    s = _store(tmp_path)
+    m = _mod()
+    _append_matched(s, m, source_sha256="a" * 64, config_subset=_CFG_A,
+                    values=_VALUES, selected=_SEL, page=1, item="a")
+    _append_matched(s, m, source_sha256="a" * 64, config_subset=_CFG_A,
+                    values=("only",), selected={"mode": "select", "value": "only",
+                                                "manually_verified": False},
+                    page=2, item="b")
+    d1 = _store(tmp_path).applicable_resolution_digest(
+        source_sha256="a" * 64, config_subset=_CFG_A
+    )
+    d2 = _store(tmp_path).applicable_resolution_digest(
+        source_sha256="a" * 64, config_subset=_CFG_A
+    )
+    assert d1 == d2 and d1 != _EMPTY_DIGEST
+
+
+def test_h1_applicable_index_no_args_equals_current(tmp_path: Path) -> None:
+    s = _store(tmp_path)
+    _append_matched(s, _mod(), source_sha256="a" * 64, config_subset=_CFG_A,
+                    values=_VALUES, selected=_SEL)
+    st = _store(tmp_path)
+    assert st.applicable_index() == st.load_index().current

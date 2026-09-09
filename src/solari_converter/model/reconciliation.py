@@ -15,13 +15,53 @@ The full ``ReconciliationLog`` record (envelope + summary) is assembled by
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-__all__ = ["DecisionCandidate", "ReconciliationDecision"]
+from solari_converter.run_identity import canonical_json
+
+__all__ = ["DecisionCandidate", "ReconciliationDecision", "compute_decision_id"]
 
 _AUTOMATIC = {"deterministic_agreement", "llm_selected"}
+
+
+def compute_decision_id(
+    *,
+    conflict_type: Literal["literal_content", "reading_order"],
+    physical_page: int,
+    scope_ids: Sequence[str],
+    candidate_reprs: Sequence[Any],
+    selected: dict[str, Any] | None,
+) -> str:
+    """The deterministic 16-hex reconciliation-decision id (Block-2 pinned contract).
+
+    ``payload = {conflict_type, physical_page, scope: sorted scope_ids,
+    candidates: sorted candidate reprs, selected: repr | null}`` →
+    ``sha256(canonical_json(payload)).hexdigest()[:16]``.
+
+    * a literal candidate repr is ``[technique, exact_literal_value]``;
+    * a reading-order candidate repr is ``[technique, [group_id, ...]]`` (geometry uses
+      the stable technique id ``"geometry"``);
+    * ``selected`` is ``{"value": exact_literal}`` (literal), ``{"order": [group_id, …]}``
+      (reading order) or ``None`` (unresolved).
+
+    It **excludes** method, confidence, ``run_id``, timestamps and any random value, so the
+    id is stable for the same evidence + result; an unresolved decision (``selected`` null)
+    never collides with a resolved one.
+    """
+    payload = {
+        "conflict_type": conflict_type,
+        "physical_page": int(physical_page),
+        "scope": sorted(scope_ids),
+        "candidates": sorted(
+            ([r[0], r[1]] for r in candidate_reprs), key=canonical_json
+        ),
+        "selected": selected,
+    }
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()[:16]
 
 
 class DecisionCandidate(BaseModel):

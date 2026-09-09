@@ -46,7 +46,12 @@ from solari_converter.model.human_review import (
 )
 from solari_converter.run_identity import canonical_json
 
-__all__ = ["compute_applicability_key", "ResolutionStore", "ResolutionIndex"]
+__all__ = [
+    "compute_applicability_key",
+    "candidate_values_for_applicability",
+    "ResolutionStore",
+    "ResolutionIndex",
+]
 
 
 # --- applicability key (research §22 / FR-071) ----------------------------------
@@ -81,6 +86,23 @@ def compute_applicability_key(
         cfg["enabled_extraction_paths"] = sorted(paths)
     parts = [source_sha256, conflict_type, region, canonical_json(cfg)]
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def candidate_values_for_applicability(
+    conflict_type: str, candidates: Sequence[Mapping[str, Any]]
+) -> list[str]:
+    """The ``candidate_values`` list :func:`compute_applicability_key` takes, derived from
+    the evidence presented to Human Review (block brief §12 — literal: the exact candidate
+    values; reading-order: the canonical JSON of each candidate/supported order). Used both
+    when a resolution is created (T061) and when its applicability is re-checked under the
+    current source/config (H1)."""
+    if conflict_type == "reading_order":
+        return [
+            canonical_json(list(c["order"]))
+            for c in candidates
+            if c.get("order") is not None
+        ]
+    return [c["value"] for c in candidates if c.get("value") is not None]
 
 
 # --- the store -------------------------------------------------------------
@@ -132,13 +154,73 @@ class ResolutionStore:
         key's chain failed closed (it must be raised fresh, FR-071)."""
         return self.load_index().current.get(applicability_key)
 
-    def applicable_resolution_digest(self) -> str:
+    def applicable_index(
+        self,
+        *,
+        source_sha256: str | None = None,
+        config_subset: Mapping[str, Any] | None = None,
+    ) -> dict[str, HumanReviewResolution]:
+        """The currently-applicable resolution set, optionally **scoped** to one source +
+        config identity (H1 / block brief §12).
+
+        With no scope arguments this is exactly ``load_index().current`` — the historical
+        behaviour every existing caller relies on. When ``source_sha256`` and/or
+        ``config_subset`` are given, a currently-applicable record is included **only** when
+
+        1. its envelope ``source_sha256`` matches, and
+        2. recomputing its applicability key from its own conflict type / physical page /
+           region bboxes / candidates-presented **and the given config subset** reproduces
+           its stored ``applicability_key``.
+
+        It **fails closed** — a record whose applicability cannot be reproduced (a raised
+        exception, or a mismatch) is excluded, so another document's / another config's
+        resolution can never change this run's identity."""
+        current = self.load_index().current
+        if source_sha256 is None and config_subset is None:
+            return dict(current)
+        scoped: dict[str, HumanReviewResolution] = {}
+        for key, r in current.items():
+            if source_sha256 is not None and r.source_sha256 != source_sha256:
+                continue
+            if config_subset is not None:
+                try:
+                    recomputed = compute_applicability_key(
+                        source_sha256=r.source_sha256,
+                        conflict_type=r.conflict_type,
+                        physical_page=r.physical_page,
+                        region_bboxes=r.region_bboxes,
+                        candidate_values=candidate_values_for_applicability(
+                            r.conflict_type,
+                            [c.model_dump() for c in r.candidates_presented],
+                        ),
+                        config_subset=config_subset,
+                    )
+                except Exception:  # noqa: BLE001 - fail closed on any recompute failure
+                    continue
+                if recomputed != r.applicability_key:
+                    continue
+            scoped[key] = r
+        return scoped
+
+    def applicable_resolution_digest(
+        self,
+        *,
+        source_sha256: str | None = None,
+        config_subset: Mapping[str, Any] | None = None,
+    ) -> str:
         """``sha256`` over the sorted ``f"{applicability_key}={canonical_json(selected)}"``
         of the **currently-applicable** resolution set (data-model.md ``RunIdentity`` /
-        research §14). Order-independent; an empty store yields ``sha256(b"").hexdigest()``.
-        Folded into ``run_id`` by ``run_identity.compute_run_id`` — *consumed* there, owned
-        here."""
-        current = self.load_index().current
+        research §14). Order-independent; an empty set yields ``sha256(b"").hexdigest()``.
+
+        ``source_sha256`` / ``config_subset`` scope the set to one document + config
+        identity (H1): a resolution created for a different source, or under a config that
+        no longer reproduces its applicability key, contributes **nothing** — so it can
+        never perturb this run's ``run_id``. With no arguments the behaviour is unchanged.
+        Folded into ``run_id`` by ``run_identity.compute_run_id`` — *consumed* there,
+        owned here."""
+        current = self.applicable_index(
+            source_sha256=source_sha256, config_subset=config_subset
+        )
         pairs = sorted(
             f"{key}={canonical_json(canonical_selected(r.selected))}"
             for key, r in current.items()

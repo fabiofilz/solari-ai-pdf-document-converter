@@ -132,6 +132,39 @@ class HumanReviewQueue(BaseModel):
             raise ValueError(f"summary {self.summary} does not match item counts {want}")
         return self
 
+    def render_markdown(self) -> str:
+        """The FR-057 ``.md`` companion of the queue (a derived, deterministic view —
+        no wall-clock). The authoritative representation stays the ``.json``."""
+        out = [
+            f"# Human review queue — run `{self.run_id}`",
+            "",
+            f"- run state: `{self.run_state}`",
+            f"- open: {self.summary.get('open', 0)} · resolved: {self.summary.get('resolved', 0)}",
+            f"- source: `{self.source_pdf}` (`{self.source_sha256[:12]}…`)",
+            f"- pages: `{self.page_selection}`",
+            "",
+        ]
+        if not self.items:
+            out.append("_No items._")
+        for it in self.items:
+            out.append(f"## `{it.id}` — {it.conflict_type} — **{it.status}**")
+            out.append(f"- physical page {it.physical_page} · reason: {it.reason}")
+            if it.confidence is not None:
+                out.append(f"- confidence: {it.confidence}")
+            out.append("- candidates:")
+            for c in it.candidates:
+                label = f" ({c.provenance_label})" if c.provenance_label else ""
+                if c.value is not None:
+                    out.append(f"  - `{c.technique}`{label}: {c.value!r}")
+                elif c.order is not None:
+                    out.append(f"  - `{c.technique}`{label}: order {list(c.order)}")
+                else:
+                    out.append(f"  - `{c.technique}`{label}")
+            if it.segment_ids:
+                out.append(f"- segment_ids: {list(it.segment_ids)}")
+            out.append("")
+        return "\n".join(out).rstrip() + "\n"
+
 
 # --- resolution ------------------------------------------------------------------
 

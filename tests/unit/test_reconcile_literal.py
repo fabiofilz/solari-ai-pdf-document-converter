@@ -415,13 +415,30 @@ def test_higher_ocr_confidence_raises_the_score():
 # --------------------------------------------------------------------------------------
 
 
-class TestFutureOwnerT060:
-    """GREEN owner: **T060** — ``reconcile/literal.py`` (NOT in Block 1).
+def _llm_client(srv):
+    from solari_converter.validate.llm_client import LLMClient
 
-    Block 1 deliberately does not create ``reconcile/literal.py``; every test here
-    fails at import until T060 lands. They pin the frozen dispatch contract:
-    ``deterministic_agreement`` emission, the 0.75 threshold routing, the post-LLM
-    guard, and the double-call flip check (research §21b / §21d, SC-020).
+    return LLMClient(base_url=srv.base_url, model="fake", seed=0, retries=0)
+
+
+def _material_3member(align):
+    """A legitimate 3-member punctuation disagreement whose deterministic confidence is
+    >= 0.75 (block brief §8 — do not retune the T057 formula to hit the threshold)."""
+    return _group(
+        align,
+        _seg("d1", (100.0, 100.0, 300.0, 120.0), "art. 12", 0, technique="docling"),
+        _seg("p1", (100.0, 100.0, 300.0, 120.0), "art. 12", 0, technique="pdfplumber"),
+        _seg("o1", (100.0, 100.0, 300.0, 120.0), "art 12", 0, origin="ocr",
+             technique="ocr:tesseract", ocr_conf=95.0),
+    )
+
+
+class TestT060LiteralDispatch:
+    """GREEN owner: **T060** — ``reconcile/literal.py`` (Block 2).
+
+    The frozen dispatch contract: ``deterministic_agreement`` emission, the 0.75
+    threshold routing, the post-LLM exact guard, the double-call flip check
+    (research §21b / §21d, SC-020, block brief §8).
     """
 
     def _literal(self):
@@ -437,9 +454,12 @@ class TestFutureOwnerT060:
             _seg("d1", (100.0, 100.0, 300.0, 120.0), "agreed", 0, technique="docling"),
             _seg("p1", (100.0, 100.0, 300.0, 120.0), "agreed", 0, technique="pdfplumber"),
         )
-        decision = literal.reconcile_literal(g)
-        assert decision.method == "deterministic_agreement"
-        assert decision.selected["value"] == "agreed"
+        out = literal.reconcile_literal(g)
+        assert out.outcome == "RESOLVED"
+        assert out.method == "deterministic_agreement"
+        assert out.selected["value"] == "agreed"
+        # SC-020: the emitted decision validates and its value is a candidate value
+        assert out.decision.selected["value"] in {"agreed"}
 
     def test_below_threshold_material_disagreement_requires_human_review(self):
         literal = self._literal()
@@ -451,17 +471,65 @@ class TestFutureOwnerT060:
             _seg("o2", (100.0, 100.0, 300.0, 120.0), "R$ 188", 0, origin="ocr",
                  technique="ocr:tesseract", ocr_conf=30.0),
         )
-        assert literal.reconcile_literal(g).outcome == "HUMAN_REVIEW_REQUIRED"
+        out = literal.reconcile_literal(g)
+        assert out.outcome == "HUMAN_REVIEW_REQUIRED"
+        assert out.review_reason == "below_threshold"
 
-    def test_at_or_above_threshold_routes_to_llm_select(self):
+    def test_at_or_above_threshold_routes_to_llm_select(self, fake_llm_server):
         literal = self._literal()
-        assert hasattr(literal, "reconcile_literal")
-        raise AssertionError("T060: >= 0.75 -> llm_select selection-only path not built yet")
+        srv = fake_llm_server("normal")  # picks candidate index 0 twice
+        g = _material_3member(_align())
+        out = literal.reconcile_literal(
+            g, llm_client=_llm_client(srv), llm_capable=True,
+            confidence_threshold=0.75,
+        )
+        assert out.outcome == "RESOLVED"
+        assert out.method == "llm_selected"
+        assert out.selected["value"] == "art. 12"  # a verbatim candidate value
+        assert len(srv.requests) == 2  # the double (flip-check) call
 
-    def test_guard_rejects_a_non_candidate_llm_value_to_human_review(self):
-        assert hasattr(self._literal(), "reconcile_literal")
-        raise AssertionError("T060: post-LLM guard dispatch not built yet")
+    def test_no_llm_mode_at_or_above_threshold_is_human_review_not_a_guess(self):
+        literal = self._literal()
+        g = _material_3member(_align())
+        out = literal.reconcile_literal(g, llm_client=None, llm_capable=False,
+                                       confidence_threshold=0.75)
+        assert out.outcome == "HUMAN_REVIEW_REQUIRED"
+        assert out.review_reason == "no_llm"
 
-    def test_llm_flip_across_the_two_calls_requires_human_review(self):
-        assert hasattr(self._literal(), "reconcile_literal")
-        raise AssertionError("T060: double-call flip detection not built yet")
+    def test_guard_rejects_a_non_candidate_llm_value_to_human_review(self, fake_llm_server):
+        literal = self._literal()
+        srv = fake_llm_server("returns_non_candidate")
+        out = literal.reconcile_literal(
+            _material_3member(_align()), llm_client=_llm_client(srv), llm_capable=True,
+        )
+        assert out.outcome == "HUMAN_REVIEW_REQUIRED"
+        assert out.review_reason == "guard_rejected"
+
+    def test_llm_flip_across_the_two_calls_requires_human_review(self, fake_llm_server):
+        literal = self._literal()
+        srv = fake_llm_server("flip")  # index 0 then 1
+        out = literal.reconcile_literal(
+            _material_3member(_align()), llm_client=_llm_client(srv), llm_capable=True,
+        )
+        assert out.outcome == "HUMAN_REVIEW_REQUIRED"
+        assert out.review_reason == "llm_flip"
+
+    def test_replayed_resolution_emits_human_confirmed_decision(self):
+        literal = self._literal()
+        align = _align()
+        g = _group(
+            align,
+            _seg("d1", (100.0, 100.0, 300.0, 120.0), "R$ 100", 0, technique="docling"),
+            _seg("o1", (100.0, 100.0, 300.0, 120.0), "R$ 188", 0, origin="ocr",
+                 technique="ocr:tesseract", ocr_conf=40.0),
+        )
+        replay = {
+            "applicability_key": "a" * 64,
+            "selected": {"mode": "entered", "value": "R$ 1.000,00", "manually_verified": True},
+        }
+        out = literal.reconcile_literal(g, replay=replay)
+        assert out.outcome == "RESOLVED"
+        assert out.method == "human_confirmed"
+        assert out.decision.replayed is True
+        assert out.decision.resolution_ref == "a" * 64
+        assert out.selected["value"] == "R$ 1.000,00"  # human value, exempt from SC-020
