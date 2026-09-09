@@ -140,14 +140,19 @@ def write_record(path_stem: str | os.PathLike[str], model: Any, *, emit_md: bool
     """Persist a pydantic record. Always writes ``<path_stem>.json``
     (``model.model_dump_json``); when ``emit_md`` also writes ``<path_stem>.md`` from
     ``model.render_markdown()`` (FR-057 dual emit). Extraction candidates and the CED pass
-    ``emit_md=False`` — JSON is their sole authoritative representation (M1)."""
+    ``emit_md=False`` — JSON is their sole authoritative representation (M1).
+
+    ``.json``/``.md`` are appended to ``path_stem`` verbatim (``stem.with_name(stem.name
+    + ext)``), never via ``Path.with_suffix()`` — a stem that itself contains a dot
+    (e.g. the candidate naming shape ``<base>.candidate.<technique>``, T051) would
+    otherwise have its trailing dotted segment silently replaced instead of a new
+    extension being appended."""
     stem = Path(path_stem)
     json_bytes = model.model_dump_json(indent=2).encode("utf-8") + b"\n"
-    written = [write_atomic(stem.with_suffix(".json"), json_bytes)]
+    written = [write_atomic(stem.with_name(stem.name + ".json"), json_bytes)]
     if emit_md:
-        written.append(
-            write_atomic(stem.with_suffix(".md"), markdown_bytes(model.render_markdown()))
-        )
+        md_path = stem.with_name(stem.name + ".md")
+        written.append(write_atomic(md_path, markdown_bytes(model.render_markdown())))
     return written
 
 
