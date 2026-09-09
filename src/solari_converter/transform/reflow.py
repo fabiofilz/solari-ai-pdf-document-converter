@@ -258,13 +258,29 @@ def _line_break_hyphen_fragment(text: str) -> str | None:
 # --- the pass ------------------------------------------------------------------------
 
 
-def reflow(ced: CanonicalExtractedDocument) -> ReflowResult:
+def reflow(
+    ced: CanonicalExtractedDocument,
+    *,
+    excluded_segment_ids: frozenset[str] = frozenset(),
+) -> ReflowResult:
     """Group ``ced``'s accepted segments (in accepted reading order) into reflowed
-    paragraph units, repairing line-break hyphens per research §27. Deterministic."""
+    paragraph units, repairing line-break hyphens per research §27. Deterministic.
+
+    ``excluded_segment_ids`` lets a caller that has already determined ownership of
+    some segments elsewhere (table reconstruction — T070) keep this pass to the
+    remainder: an excluded segment never appears in any :class:`ReflowUnit` or
+    :class:`SegmentTransform` and acts as a **hard boundary** — the segments
+    immediately before and after it are never joined into the same unit, exactly as
+    if a blocking structural hint sat there. The default (no exclusions) is
+    byte/semantically identical to the prior signature. The §27 positive-evidence
+    token index stays CED-wide regardless of exclusions (research §27 is a
+    document-wide lexical check, not a per-unit one).
+    """
     by_id = {s.segment_id: s for s in ced.accepted_segments}
     ordered = [by_id[sid] for sid in ced.accepted_reading_order if sid in by_id]
 
-    # CED-wide complete-token index for the §27 positive-evidence lookup.
+    # CED-wide complete-token index for the §27 positive-evidence lookup — unaffected
+    # by exclusions; §27 attestation may come from any accepted segment.
     token_owner: dict[str, str] = {}
     for seg in ordered:
         for tok in _tokens(seg.text):
@@ -290,6 +306,13 @@ def reflow(ced: CanonicalExtractedDocument) -> ReflowResult:
         cur_ids, cur_segs, cur_text, cur_tx = [], [], "", []
 
     for seg in ordered:
+        if seg.segment_id in excluded_segment_ids:
+            # A hard boundary: end whatever unit was building; the excluded segment
+            # itself never starts or joins one, so the segments on either side of it
+            # can never become adjacent for reflow purposes.
+            _flush()
+            continue
+
         if not cur_ids:
             cur_ids, cur_segs, cur_text, cur_tx = [seg.segment_id], [seg], seg.text, []
             continue

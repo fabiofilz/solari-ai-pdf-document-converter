@@ -172,6 +172,118 @@ def test_wrapped_cell_uncertain_is_not_merged():
     )
 
 
+def test_three_line_wrapped_cell_is_joined_in_source_order():
+    # R1: a continuation chain longer than two lines must not drop the tail line
+    # when an earlier continuation row has already been folded into the row above.
+    segs = tgrid([["Desc", "Amt"], ["line one", "9.99"]])  # rows at top 100, 120
+    segs.append(Seg("wrap1", "line two", (_X0, 132, _X0 + _CELLW, 144),
+                    hints=[("table_cell", None, "pdfplumber")]))
+    segs.append(Seg("wrap2", "line three", (_X0, 144, _X0 + _CELLW, 156),
+                    hints=[("table_cell", None, "pdfplumber")]))
+    result, _ = build(segs)
+    t = only_table(result)
+    assert [c.text for c in t.rows[1]] == ["line one line two line three", "9.99"]
+    assert t.rows[1][0].provenance == ("p1r1c0", "wrap1", "wrap2")  # source order
+    assert {"p1r1c0", "wrap1", "wrap2"} <= set(result.consumed_segment_ids)
+    # every emitted transform corresponds to retained composition — no dangling
+    # reference to a segment outside the final table's own ownership
+    all_transform_ids = {sid for tr in result.transforms for sid in tr.segment_ids}
+    assert all_transform_ids <= result.consumed_segment_ids
+    joins = {tr.segment_ids for tr in result.transforms if tr.kind == "reflow_whitespace"}
+    assert ("p1r1c0", "wrap1") in joins
+    assert ("p1r1c0", "wrap1", "wrap2") in joins
+
+
+def test_four_line_wrapped_cell_chain_retains_every_line_in_order():
+    # R1, generalised: an arbitrary deterministic chain (not special-cased at 3 lines).
+    segs = tgrid([["Desc", "Amt"], ["line one", "9.99"]])
+    for sid, text, top in [
+        ("wrap1", "line two", 132), ("wrap2", "line three", 144),
+        ("wrap3", "line four", 156),
+    ]:
+        segs.append(Seg(sid, text, (_X0, top, _X0 + _CELLW, top + 12),
+                        hints=[("table_cell", None, "pdfplumber")]))
+    result, _ = build(segs)
+    t = only_table(result)
+    assert t.rows[1][0].text == "line one line two line three line four"
+    assert t.rows[1][0].provenance == ("p1r1c0", "wrap1", "wrap2", "wrap3")
+    assert {"p1r1c0", "wrap1", "wrap2", "wrap3"} <= set(result.consumed_segment_ids)
+    all_transform_ids = {sid for tr in result.transforms for sid in tr.segment_ids}
+    assert all_transform_ids <= result.consumed_segment_ids
+    # exact source character preservation except the permitted single-space boundary
+    assert t.rows[1][0].text == " ".join(
+        ["line one", "line two", "line three", "line four"]
+    )
+
+
+# --- span vs. real anchor (R2) --------------------------------------------------
+
+
+def test_rowspan_conflicting_with_a_real_anchor_is_reduced_to_one():
+    segs = [
+        Seg("cat", "category", (72, 100, 152, 128), page=1,
+            hints=[("table_cell", None, "pdfplumber")]),  # would-be rowspan 2
+        tcell("x1", "one", 1, 100),
+        tcell("x2", "two", 1, 114),
+        # a genuine second segment anchored exactly where cat's rowspan would cover
+        Seg("override", "special", (72, 114, 152, 126), page=1,
+            hints=[("table_cell", None, "pdfplumber")]),
+    ]
+    result, _ = build(segs)
+    t = only_table(result)
+    assert t.rows[0][0].text == "category"
+    assert t.rows[0][0].rowspan == 1  # the disputed span is cancelled, not dropped
+    assert t.rows[1][0].text == "special"
+    assert t.rows[1][0].provenance == ("override",)
+    assert {"cat", "override"} <= set(result.consumed_segment_ids)
+    assert any(
+        a.kind == "span_uncertain" and "cat" in a.segment_ids
+        for a in result.ambiguities
+    )
+
+
+def test_colspan_conflicting_with_a_real_anchor_is_reduced_to_one():
+    segs = [
+        Seg("h", "wide label", (72, 100, 252, 112), page=1,
+            hints=[("table_cell", None, "pdfplumber")]),  # would-be colspan 2
+        # a genuine second segment anchored exactly where h's colspan would cover
+        Seg("override", "right value", (162, 100, 242, 112), page=1,
+            hints=[("table_cell", None, "pdfplumber")]),
+        tcell("a", "left", 0, 116),
+        tcell("b", "right", 1, 116),
+    ]
+    result, _ = build(segs)
+    t = only_table(result)
+    assert len(t.rows[0]) == 2  # no duplicate / covered-position placement
+    assert t.rows[0][0].text == "wide label"
+    assert t.rows[0][0].colspan == 1
+    assert t.rows[0][1].text == "right value"
+    assert t.rows[0][1].provenance == ("override",)
+    assert {"h", "override"} <= set(result.consumed_segment_ids)
+    assert any(
+        a.kind == "span_uncertain" and "h" in a.segment_ids for a in result.ambiguities
+    )
+
+
+def test_span_conflict_resolution_is_deterministic_under_permutation():
+    segs = [
+        Seg("cat", "category", (72, 100, 152, 128), page=1,
+            hints=[("table_cell", None, "pdfplumber")]),
+        tcell("x1", "one", 1, 100),
+        tcell("x2", "two", 1, 114),
+        Seg("override", "special", (72, 114, 152, 126), page=1,
+            hints=[("table_cell", None, "pdfplumber")]),
+    ]
+    fixed_order = [s.sid for s in segs]
+    r1, _ = build(segs, order=fixed_order)
+    r2, _ = build(list(reversed(segs)), order=fixed_order)
+    assert [a.kind for a in r1.ambiguities] == [a.kind for a in r2.ambiguities]
+    t1, t2 = only_table(r1), only_table(r2)
+    assert [[c.text for c in row] for row in t1.rows] == [
+        [c.text for c in row] for row in t2.rows
+    ]
+
+
 # --- fidelity ------------------------------------------------------------------
 
 
@@ -315,9 +427,10 @@ def test_intervening_prose_blocks_the_stitch():
 
 
 def test_page_number_between_fragments_is_transparent_and_preserved():
+    # "53" alone carries no positive page-number evidence (R3) — an explicit prefix does.
     segs = (
         tgrid([["Date", "Amt"], ["2026-01-01", "1"]], page=1, top0=60.0)
-        + [Seg("pg", "53", (280, 760, 300, 772), page=1)]
+        + [Seg("pg", "Page 53", (280, 760, 340, 772), page=1)]
         + tgrid([["Date", "Amt"], ["2026-02-01", "2"]], page=2, top0=60.0)
     )
     result, _ = build(segs)
@@ -326,6 +439,107 @@ def test_page_number_between_fragments_is_transparent_and_preserved():
     assert len(result.stitch_records) == 1
     assert result.stitch_records[0].transparent_segment_ids == ("pg",)
     assert "pg" not in result.consumed_segment_ids  # transparent != removed/consumed
+
+
+def test_bare_page_number_matching_the_physical_page_is_transparent():
+    # a bare integer with no prefix is transparent only when it equals the physical
+    # page it sits on (positive evidence) — R3.
+    segs = (
+        tgrid([["Date", "Amt"], ["2026-01-01", "1"]], page=1, top0=60.0)
+        + [Seg("pg", "1", (280, 760, 300, 772), page=1)]
+        + tgrid([["Date", "Amt"], ["2026-02-01", "2"]], page=2, top0=60.0)
+    )
+    result, _ = build(segs)
+    t = only_table(result)
+    assert t.spans_pages == [1, 2]
+    assert result.stitch_records[0].transparent_segment_ids == ("pg",)
+    assert "pg" not in result.consumed_segment_ids
+
+
+def test_bare_page_number_in_an_adjacent_sequence_is_transparent():
+    # "52" on page 1 and "53" on page 2 form a deterministic n / n+1 sequence — R3.
+    segs = (
+        tgrid([["Date", "Amt"], ["2026-01-01", "1"]], page=1, top0=60.0)
+        + [Seg("pg1", "52", (280, 760, 300, 772), page=1)]
+        + tgrid([["Date", "Amt"], ["2026-02-01", "2"]], page=2, top0=60.0)
+        + [Seg("pg2", "53", (280, 760, 300, 772), page=2)]
+    )
+    result, _ = build(segs)
+    t = only_table(result)
+    assert t.spans_pages == [1, 2]
+    assert result.stitch_records[0].transparent_segment_ids == ("pg1",)
+    assert "pg1" not in result.consumed_segment_ids
+    assert "pg2" not in result.consumed_segment_ids
+
+
+def test_bare_lone_year_between_fragments_is_not_transparent():
+    # "2024" has no page-number evidence at all — it must block the stitch (R3).
+    segs = (
+        tgrid([["Date", "Amt"], ["2026-01-01", "1"]], page=1, top0=60.0)
+        + [Seg("yr", "2024", (280, 760, 320, 772), page=1)]
+        + tgrid([["Date", "Amt"], ["2026-02-01", "2"]], page=2, top0=60.0)
+    )
+    result, _ = build(segs)
+    assert sum(1 for b in result.blocks if b.kind == "table") == 2
+    assert not result.stitch_records
+    assert "yr" not in result.consumed_segment_ids
+
+
+@pytest.mark.parametrize("value", ["I", "V", "X", "L", "C"])
+def test_bare_roman_letter_between_fragments_is_not_transparent(value):
+    # a lone Roman-numeral-shaped letter is an ordinary token, not page-number evidence.
+    segs = (
+        tgrid([["Date", "Amt"], ["2026-01-01", "1"]], page=1, top0=60.0)
+        + [Seg("rn", value, (280, 760, 300, 772), page=1)]
+        + tgrid([["Date", "Amt"], ["2026-02-01", "2"]], page=2, top0=60.0)
+    )
+    result, _ = build(segs)
+    assert sum(1 for b in result.blocks if b.kind == "table") == 2
+    assert not result.stitch_records
+    assert "rn" not in result.consumed_segment_ids
+
+
+def test_price_and_section_number_between_fragments_are_not_transparent():
+    for text in ("$ 12", "Section 12"):
+        segs = (
+            tgrid([["Date", "Amt"], ["2026-01-01", "1"]], page=1, top0=60.0)
+            + [Seg("x", text, (280, 760, 360, 772), page=1)]
+            + tgrid([["Date", "Amt"], ["2026-02-01", "2"]], page=2, top0=60.0)
+        )
+        result, _ = build(segs)
+        assert sum(1 for b in result.blocks if b.kind == "table") == 2, text
+        assert not result.stitch_records, text
+        assert "x" not in result.consumed_segment_ids, text
+
+
+def test_repeated_furniture_at_a_different_vertical_position_is_not_transparent():
+    # same comparison key on both pages, but the second occurrence sits far from the
+    # first's top coordinate — position-inconsistent repetition is content, not furniture.
+    segs = (
+        tgrid([["Date", "Amt"], ["2026-01-01", "1"]], page=1, top0=60.0)
+        + [Seg("note", "Valores em R$ 1.000,00", (72, 300, 300, 312), page=1)]
+        + tgrid([["Date", "Amt"], ["2026-02-01", "2"]], page=2, top0=60.0)
+        + [Seg("note2", "Valores em R$ 1.000,00", (72, 400, 300, 412), page=2)]
+    )
+    result, _ = build(segs)
+    assert sum(1 for b in result.blocks if b.kind == "table") == 2
+    assert not result.stitch_records
+    assert "note" not in result.consumed_segment_ids
+
+
+def test_repeated_furniture_at_a_consistent_vertical_position_is_transparent():
+    # a genuine running header/footer: identical text, same top on every page.
+    segs = (
+        [Seg("hdr1", "ACME CORP", (72, 30, 300, 42), page=1)]
+        + tgrid([["Date", "Amt"], ["2026-01-01", "1"]], page=1, top0=60.0)
+        + [Seg("hdr2", "ACME CORP", (72, 30, 300, 42), page=2)]
+        + tgrid([["Date", "Amt"], ["2026-02-01", "2"]], page=2, top0=60.0)
+    )
+    result, _ = build(segs)
+    t = only_table(result)
+    assert t.spans_pages == [1, 2]
+    assert set(result.stitch_records[0].transparent_segment_ids) == {"hdr2"}
+    assert "hdr2" not in result.consumed_segment_ids
 
 
 # --- repeated header collapse -------------------------------------------------
@@ -413,6 +627,55 @@ def test_reorder_and_no_reorder_share_the_same_logical_table_id():
     a, _ = build(segs, order=["s0", "s1", "s2", "s3"])
     b, _ = build(segs, order=["s0", "s2", "s1", "s3"])
     assert only_table(a).table_id == only_table(b).table_id
+
+
+# --- collapsed-header StructuralReorder (R4) -----------------------------------
+
+
+def test_stitched_table_with_collapsed_header_and_row_major_input_emits_no_reorder():
+    # the repeated continuation header collapses, but the retained rows were already
+    # in row-major accepted order — collapsing a header alone must not fabricate a
+    # StructuralReorder.
+    segs = (
+        tgrid([["Date", "Amount"], ["2026-01-01", "100.00"]], page=1, top0=60.0)
+        + tgrid([["Date", "Amount"], ["2026-02-01", "200.00"]], page=2, top0=60.0)
+    )
+    result, _ = build(segs)
+    assert result.collapsed_headers
+    assert result.structural_reorder == ()
+
+
+def test_column_major_input_with_collapsed_header_reorders_retained_ids_only():
+    segs = (
+        tgrid([["Date", "Amount"], ["2026-01-01", "100.00"]], page=1, top0=60.0)
+        + tgrid([["Date", "Amount"], ["2026-02-01", "200.00"]], page=2, top0=60.0)
+    )
+
+    def colmajor(prefix):
+        return [f"{prefix}r0c0", f"{prefix}r1c0", f"{prefix}r0c1", f"{prefix}r1c1"]
+
+    order = colmajor("p1") + colmajor("p2")
+    result, _ = build(segs, order=order)
+    t = only_table(result)
+    assert [[c.text for c in row] for row in t.rows] == [
+        ["Date", "Amount"], ["2026-01-01", "100.00"], ["2026-02-01", "200.00"],
+    ]
+    assert result.collapsed_headers
+    collapsed_ids = {sid for ch in result.collapsed_headers for sid in ch.segment_ids}
+    assert collapsed_ids == {"p2r0c0", "p2r0c1"}
+
+    assert len(result.structural_reorder) == 1
+    entry = result.structural_reorder[0]
+    retained_ids = {"p1r0c0", "p1r0c1", "p1r1c0", "p1r1c1", "p2r1c0", "p2r1c1"}
+    assert set(entry.from_order) == retained_ids
+    assert set(entry.to_order) == retained_ids
+    assert entry.from_order != entry.to_order
+    # the collapsed continuation header is represented solely via CollapsedHeader —
+    # never as an artificial slot in the reorder's from_order / to_order
+    assert collapsed_ids.isdisjoint(entry.from_order)
+    assert collapsed_ids.isdisjoint(entry.to_order)
+    # but it is still consumed / traceable via the collapsed-header lineage
+    assert collapsed_ids <= set(result.consumed_segment_ids)
 
 
 # --- lineage / consumed ids ---------------------------------------------------

@@ -10,9 +10,12 @@ continuation header, and geometry-only merged-cell spans (FR-020 / FR-021 / FR-0
 Hard guarantees
 ---------------
 
-* **deterministic** — a pure function of the CED (+ the surrounding-content view of the
-  :class:`~solari_converter.transform.reflow.ReflowResult`); no LLM, no network, no
-  dictionary, no randomness, no third-party table library, no PDF reopening;
+* **deterministic** — a pure function of the CED alone; no LLM, no network, no
+  dictionary, no randomness, no third-party table library, no PDF reopening. The
+  :class:`~solari_converter.transform.reflow.ReflowResult` is **not** table input: table
+  ownership is determined *before* non-table reflow (``build_tables(ced)`` first, then
+  ``reflow(ced, excluded_segment_ids=result.consumed_segment_ids)``) so a hint-less cell
+  absorbed by geometry can never be half-owned by a prose unit;
 * **literal-faithful** — a cell's text is a source segment's own character sequence,
   verbatim. The *only* permitted composition is the audited multi-segment wrapped-line
   boundary join (``WRAPPED_LINE_JOIN`` between two segment literals, recorded as a
@@ -65,11 +68,13 @@ __all__ = [
     "CELL_WRAP_UNCERTAIN_GAP_RATIO",
     "HEADER_RESEMBLANCE_RATIO",
     "FURNITURE_REPEAT_MIN_PAGES",
+    "FURNITURE_TOP_TOLERANCE",
     "MIN_GRID_ROWS",
     "MIN_GRID_COLS",
     "MIN_POPULATED_ROWS",
     "MIN_FILLED_POSITIONS",
     "PAGE_NUMBER_RE",
+    "PAGE_NUMBER_BARE_RE",
     "TableCell",
     "TableFragment",
     "LogicalTable",
@@ -141,10 +146,18 @@ CELL_WRAP_UNCERTAIN_GAP_RATIO: float = 0.97
 #: as a rejected header repeat rather than silently kept — but still **not** collapsed.
 HEADER_RESEMBLANCE_RATIO: float = 0.6
 
-#: A hint-less segment between two page fragments is "stitch-transparent" only if it
-#: matches ``PAGE_NUMBER_RE`` **or** its comparison key repeats on at least this many
-#: distinct physical pages.
+#: A hint-less segment between two page fragments is "stitch-transparent" only if it is
+#: a page number with *positive* evidence (``PAGE_NUMBER_RE`` explicit prefix, or a bare
+#: ``PAGE_NUMBER_BARE_RE`` integer that equals its physical page or sits in an
+#: adjacent-page ``n`` / ``n+1`` sequence) **or** its comparison key repeats on at least
+#: this many distinct physical pages at a *position-consistent* top coordinate.
 FURNITURE_REPEAT_MIN_PAGES: int = 2
+
+#: Repeated furniture must recur with its bbox top within this many PDF units of the
+#: candidate's top on every counted page. Larger than the 1-unit bbox rounding jitter
+#: that ``segment_id`` tolerates between techniques, and well under one text line
+#: (≈12 units), so two different lines can never alias as the same furniture.
+FURNITURE_TOP_TOLERANCE: float = 4.0
 
 #: Minimum corroborated grid: at least this many row bands …
 MIN_GRID_ROWS: int = 2
@@ -155,11 +168,22 @@ MIN_POPULATED_ROWS: int = 2
 #: … and at least this many filled logical positions overall.
 MIN_FILLED_POSITIONS: int = 3
 
-#: A conservative page-number / running-number pattern (stitch transparency only — never
-#: used to remove anything; artifact removal is T071/T072).
+#: An *explicitly prefixed* page number (``Page 12`` / ``Pág. 3`` / ``fls. 7`` /
+#: ``página iv``) — positive evidence on its own. Stitch transparency only; never used
+#: to remove anything (artifact removal is T071/T072).
 PAGE_NUMBER_RE = re.compile(
-    r"^\s*(?:[-–—]\s*)?(?:p\.?|p[aá]g\.?|page|p[aá]gina|fls?\.?|folha)?\s*"
-    r"[0-9ivxlcIVXLC]{1,6}\s*(?:/\s*[0-9]{1,6})?\s*(?:[-–—]\s*)?$"
+    r"^\s*(?:[-–—]\s*)?(?:p\.|p[aá]g\.?|page|p[aá]gina|fls?\.|folha)\s*"
+    r"(?:[0-9]{1,6}|[ivxlc]{1,6})\s*(?:/\s*[0-9]{1,6})?\s*(?:[-–—]\s*)?$",
+    re.IGNORECASE,
+)
+
+#: A *bare* decimal page-number candidate (``53`` / ``- 53 -`` / ``53/120``). On its
+#: own this is **not** evidence — a year, a price, a clause number look the same. It
+#: becomes transparent only when the integer equals the segment's physical page or a
+#: bare number on the adjacent physical page continues the sequence. Roman letters are
+#: deliberately excluded (``I`` / ``V`` / ``X`` / ``L`` / ``C`` are ordinary tokens).
+PAGE_NUMBER_BARE_RE = re.compile(
+    r"^\s*(?:[-–—]\s*)?([0-9]{1,6})\s*(?:/\s*[0-9]{1,6})?\s*(?:[-–—]\s*)?$"
 )
 
 
@@ -446,22 +470,22 @@ def _group_fragments(page_segs: list[AcceptedSegment]) -> list[list[AcceptedSegm
 
 
 def build_tables(
-    ced: CanonicalExtractedDocument, reflow_result: ReflowResult
+    ced: CanonicalExtractedDocument, reflow_result: ReflowResult | None = None
 ) -> TablesResult:
     """Reconstruct logical tables from ``ced``'s accepted segments. Deterministic.
 
-    ``reflow_result`` is used only as a view of the surrounding non-table content for
-    stitch-adjacency / intervening-content decisions — never as a source of cell text.
+    The CED is the **only** input. Every stitch-adjacency / intervening-content decision
+    is taken on ``accepted_reading_order`` directly. ``reflow_result`` is accepted for
+    backward compatibility and ignored: table ownership must be known *before* the
+    non-table reflow runs (call ``build_tables(ced)`` first, then
+    ``reflow(ced, excluded_segment_ids=result.consumed_segment_ids)``).
     """
-    return _Builder(ced, reflow_result).run()
+    return _Builder(ced).run()
 
 
 class _Builder:
-    def __init__(
-        self, ced: CanonicalExtractedDocument, reflow_result: ReflowResult
-    ) -> None:
+    def __init__(self, ced: CanonicalExtractedDocument) -> None:
         self.ced = ced
-        self.reflow_result = reflow_result
         self.by_id: dict[str, AcceptedSegment] = {
             s.segment_id: s for s in ced.accepted_segments
         }
@@ -713,9 +737,24 @@ class _Builder:
             span_amb.extend(c_amb)
             placed.append((r0, c0, rspan, cspan, s))
 
+        # A real source segment always wins over an inferred span: an anchor that lies
+        # inside another cell's would-be coverage cancels the disputed span dimension.
+        anchor_positions = {(r0, c0) for r0, c0, _, _, _ in placed}
         for r0, c0, rspan, cspan, s in placed:
             rspan = max(1, min(rspan, nrows - r0))
             cspan = max(1, min(cspan, ncols - c0))
+            if rspan > 1 or cspan > 1:
+                rspan, cspan, hit = _resolve_span_conflict(
+                    r0, c0, rspan, cspan, anchor_positions
+                )
+                if hit is not None:
+                    span_amb.append(
+                        TableAmbiguity(
+                            "span_uncertain", scope, (s.segment_id,),
+                            "inferred span would cover a real source segment at "
+                            f"row {hit[0]}, column {hit[1]} — disputed span kept at 1",
+                        )
+                    )
             key = (r0, c0)
             if key in anchors:
                 # a second segment landed on the same anchor position: keep the
@@ -790,6 +829,8 @@ class _Builder:
             if cont.colspan != 1 or cont.rowspan != 1 or len(cont.provenance) != 1:
                 continue
             above = self._anchor_at(grid, r - 1, cont.column, drop_rows)
+            if above is not None and above.row == cont.row:
+                above = None  # the only candidate is the continuation row itself
             if above is None or above.is_empty or above.colspan != 1:
                 continue
             offset = bands[r].top - bands[r - 1].top
@@ -832,9 +873,17 @@ class _Builder:
     def _anchor_at(
         grid: list[list[TableCell]], r: int, column: int, drop_rows: set[int]
     ) -> TableCell | None:
-        for c in grid[r]:
-            if c.column == column:
-                return c
+        """The cell anchored at ``column`` on the nearest logical row at or above
+        ``r`` that has **not** already been folded away. A continuation line of an
+        already-merged cell therefore resolves to the retained (merged) cell, so an
+        arbitrary ``line1 → line2 → line3 → …`` chain accumulates in source order."""
+        for rr in range(r, -1, -1):
+            if rr in drop_rows:
+                continue
+            for c in grid[rr]:
+                if c.column == column:
+                    return c
+            return None
         return None
 
     @staticmethod
@@ -878,20 +927,56 @@ class _Builder:
         return [self.order[i] for i in range(lo + 1, hi)]
 
     def _is_transparent(self, seg_id: str, stitch_pages: set[int]) -> bool:
+        """May this hint-less intervening segment be ignored for *continuity
+        detection only*? It stays in the document either way — transparency is never
+        removal authority (that is T071 / T072)."""
         seg = self.by_id[seg_id]
         if self._has_table_hint(seg_id):
             return False
         if seg.source.physical_page not in stitch_pages:
             return False
-        text = seg.text
-        if PAGE_NUMBER_RE.match(text):
-            return True
-        k = _key(text)
-        pages = {
-            self.by_id[o].source.physical_page
-            for o in self.order
-            if _key(self.by_id[o].text) == k
-        }
+        return self._is_page_number(seg) or self._is_repeated_furniture(seg)
+
+    def _bare_page_number(self, seg: AcceptedSegment) -> int | None:
+        """The integer of a standalone bare-number segment (hint-less), else ``None``."""
+        if self._has_table_hint(seg.segment_id):
+            return None
+        m = PAGE_NUMBER_BARE_RE.match(seg.text)
+        return int(m.group(1)) if m else None
+
+    def _is_page_number(self, seg: AcceptedSegment) -> bool:
+        if PAGE_NUMBER_RE.match(seg.text):
+            return True  # explicit prefix — positive evidence on its own
+        value = self._bare_page_number(seg)
+        if value is None:
+            return False
+        page = seg.source.physical_page
+        if value == page:
+            return True  # printed number equals the physical page
+        # adjacent-page sequence: n on page p and n±1 on page p±1
+        for delta in (-1, 1):
+            for other in self.by_id.values():
+                if other.source.physical_page != page + delta:
+                    continue
+                if self._bare_page_number(other) == value + delta:
+                    return True
+        return False
+
+    def _is_repeated_furniture(self, seg: AcceptedSegment) -> bool:
+        """Key-exact repetition on ≥ ``FURNITURE_REPEAT_MIN_PAGES`` distinct pages at a
+        position-consistent top (within ``FURNITURE_TOP_TOLERANCE``). Repeated prose at
+        materially different vertical positions is content, not furniture."""
+        box = _bbox(seg)
+        if box is None:
+            return False
+        k = _key(seg.text)
+        pages: set[int] = set()
+        for other in self.by_id.values():
+            obox = _bbox(other)
+            if obox is None or _key(other.text) != k:
+                continue
+            if abs(obox[1] - box[1]) <= FURNITURE_TOP_TOLERANCE:
+                pages.add(other.source.physical_page)
         return len(pages) >= FURNITURE_REPEAT_MIN_PAGES
 
     def _can_stitch(
@@ -1086,13 +1171,13 @@ class _Builder:
     def _emit_grid_reorder(
         self, table_id: str, group: list[TableFragment], rows: list[list[TableCell]]
     ) -> None:
+        """Record a table-scoped reorder **only** over the retained logical cells. A
+        collapsed continuation header has no logical position — its lineage is the
+        :class:`CollapsedHeader`, never an artificial slot in ``to_order``."""
         row_major: list[str] = []
         for r in rows:
             for c in r:
                 row_major.extend(c.provenance)
-        for ch in self.collapsed_headers:
-            if ch.table_id == table_id:
-                row_major.extend(ch.segment_ids)
         row_major = _dedup(row_major)
         affected = set(row_major)
         accepted = [s for s in self.order if s in affected]
@@ -1174,6 +1259,35 @@ def _span(
             )
         )
     return (first, span, amb)
+
+
+def _resolve_span_conflict(
+    r0: int,
+    c0: int,
+    rspan: int,
+    cspan: int,
+    anchor_positions: set[tuple[int, int]],
+) -> tuple[int, int, tuple[int, int] | None]:
+    """Reduce an inferred span so it never covers another real anchor. The disputed
+    dimension collapses to 1 (a conflict on the same column → ``rowspan``; on the same
+    row → ``colspan``; diagonal → both). Returns the resolved spans and the first
+    conflicting position in ``(row, column)`` order, or ``None`` when undisputed."""
+    conflicts = sorted(
+        (r0 + dr, c0 + dc)
+        for dr in range(rspan)
+        for dc in range(cspan)
+        if (dr, dc) != (0, 0) and (r0 + dr, c0 + dc) in anchor_positions
+    )
+    if not conflicts:
+        return rspan, cspan, None
+    for (rr, cc) in conflicts:
+        if rr > r0 and cc == c0:
+            rspan = 1
+        elif rr == r0 and cc > c0:
+            cspan = 1
+        else:
+            rspan, cspan = 1, 1
+    return rspan, cspan, conflicts[0]
 
 
 def _row_keys(row) -> tuple[str, ...]:
