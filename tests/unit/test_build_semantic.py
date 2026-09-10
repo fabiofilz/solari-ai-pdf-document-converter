@@ -71,9 +71,10 @@ def test_table_ownership_is_determined_before_non_table_reflow():
 
 
 def _full_fixture():
-    """table + heading + paragraph + list + a removable running header/footer."""
+    """table + heading + paragraph + list + an evidenced page-number footer (removed)
+    + a generic repeated header (KEPT under H1 — no independent artifact evidence)."""
     return ced([
-        Seg("h1", "ACME CORP — CONFIDENTIAL", (72, 30, 452, 42), page=1),  # header (removed)
+        Seg("h1", "ACME CORP — CONFIDENTIAL", (72, 30, 452, 42), page=1),  # header (kept, H1)
         Seg("title", "Overview", (72, 60, 200, 74), page=1,
             hints=[("heading", 1, "docling")]),
         _cell("th0", "Item", 72, 100), _cell("th1", "Qty", 162, 100),
@@ -81,10 +82,9 @@ def _full_fixture():
         Seg("intro", "Below is the applicable clause.", (72, 140, 452, 154), page=1),
         Seg("li1", "- First point.", (72, 168, 452, 182), page=1),
         Seg("li2", "- Second point.", (72, 186, 452, 200), page=1),
-        Seg("f1", "Page 1", (250, 760, 340, 772), page=1),  # footer (removed)
-        # further pages' identical running header — R2 requires at least 3 qualifying
-        # occurrences before generic repetition-based furniture removal is authorised
-        # (2 contiguous occurrences are ambiguous, kept).
+        Seg("f1", "Page 1", (250, 760, 340, 772), page=1),  # footer: page-number evidence → removed
+        # further pages' identical running header — generic repeated text, no
+        # independent artifact-specific evidence → KEPT and logged ambiguous (H1).
         Seg("h2", "ACME CORP — CONFIDENTIAL", (72, 30, 452, 42), page=2),
         Seg("body2", "Continuation body content on page two.", (72, 100, 452, 130), page=2),
         Seg("h3", "ACME CORP — CONFIDENTIAL", (72, 30, 452, 42), page=3),
@@ -131,11 +131,13 @@ def test_artifact_removed_ids_never_appear_in_any_block():
     bs = _build_semantic()
     doc = _full_fixture()
     doc_sem = bs.build_semantic(doc)
-    assert "h1" in doc_sem.removed_segment_ids
+    # "Page 1" carries explicit page-number evidence → removed. The generic repeated
+    # header carries none → retained (H1).
     assert "f1" in doc_sem.removed_segment_ids
+    assert "h1" not in doc_sem.removed_segment_ids
     all_block_ids = {sid for b in doc_sem.blocks for sid in b.provenance}
-    assert "h1" not in all_block_ids
     assert "f1" not in all_block_ids
+    assert "h1" in all_block_ids
 
 
 def test_table_owned_ids_are_disjoint_from_non_table_and_removed():

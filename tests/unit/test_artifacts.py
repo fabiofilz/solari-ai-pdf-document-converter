@@ -34,7 +34,10 @@ def _footer(sid, page, n):
     return Seg(sid, f"Page {n}", (250, 760, 340, 772), page=page)
 
 
-def test_repeated_running_header_and_footer_and_page_number_are_removed_and_logged():
+def test_evidenced_page_numbers_are_removed_generic_repeated_header_is_kept():
+    # H1: a generic repeated header ("ACME CORP — CONFIDENTIAL") has no independent
+    # artifact-specific evidence — it is KEPT and recorded, never deleted. The
+    # explicitly-prefixed "Page n" footers keep their own page-number removal authority.
     a = _artifacts()
     segs = []
     for page in (1, 2, 3):
@@ -46,8 +49,12 @@ def test_repeated_running_header_and_footer_and_page_number_are_removed_and_logg
     doc = ced(segs)
     result = a.remove_artifacts(doc, _reflow(doc))
     kept = {s for u in result.kept_units for s in u.segment_ids}
-    assert kept == {"body1", "body2", "body3"}
-    assert {e.entry_type for e in result.removal_log.entries} >= {"running_header", "page_number"}
+    assert kept == {"body1", "body2", "body3", "h1", "h2", "h3"}
+    assert {"f1", "f2", "f3"}.isdisjoint(kept)
+    hdr = [e for e in result.removal_log.entries if e.entry_type == "running_header"]
+    assert hdr and all(e.ambiguous for e in hdr)
+    pno = [e for e in result.removal_log.entries if e.entry_type == "page_number"]
+    assert pno and all(not e.ambiguous for e in pno)
 
 
 def test_a_header_string_that_is_also_body_content_is_kept_and_recorded():

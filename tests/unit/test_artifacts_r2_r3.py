@@ -70,14 +70,19 @@ def test_two_page_contiguous_margin_consistent_run_is_kept_as_ambiguous():
     assert any("at least 3" in (e.note or "") for e in entries)
 
 
-def test_three_page_contiguous_margin_consistent_run_is_removed():
+def test_three_page_contiguous_margin_consistent_run_is_kept_without_independent_evidence():
+    # H1 (third pass): even 3+ contiguous, majority, position-consistent occurrences
+    # are only an artifact *candidate*. Generic repeated text has no independent
+    # artifact-specific evidence — KEEP, recorded, never removed. Deleting legitimate
+    # repeated author text ("Terms and Conditions") is the worse error.
     result, _ = _run([
         _hdr("h1", 1), _body("b1", 1), _hdr("h2", 2), _body("b2", 2),
         _hdr("h3", 3), _body("b3", 3),
     ])
-    assert {"h1", "h2", "h3"}.isdisjoint(_kept(result))
+    assert {"h1", "h2", "h3"} <= _kept(result)
     entries = [e for e in result.removal_log.entries if e.entry_type == "running_header"]
-    assert entries and all(not e.ambiguous for e in entries)
+    assert entries and all(e.ambiguous for e in entries)
+    assert any("H1" in (e.note or "") for e in entries)
 
 
 def test_two_page_discontinuous_selection_is_kept_with_ambiguity():
@@ -121,16 +126,17 @@ def test_repeated_short_body_text_off_the_margin_is_not_a_candidate():
     )
 
 
-def test_genuine_running_header_across_a_sufficiently_evidenced_run_is_removed():
+def test_generic_repeated_header_is_kept_and_logged_even_when_heavily_repeated():
     segs = [
         _hdr("h1", 1), _body("b1", 1),
         _hdr("h2", 2), _body("b2", 2),
         _hdr("h3", 3), _body("b3", 3),
+        _hdr("h4", 4), _body("b4", 4),
     ]
     result, _ = _run(segs)
-    assert {"h1", "h2", "h3"}.isdisjoint(_kept(result))
+    assert {"h1", "h2", "h3", "h4"} <= _kept(result)
     entries = [e for e in result.removal_log.entries if e.entry_type == "running_header"]
-    assert entries and all(not e.ambiguous for e in entries)
+    assert entries and all(e.ambiguous for e in entries)
 
 
 def _repeat(sid_prefix, text, pages, *, y=30.0):

@@ -186,12 +186,23 @@ class ArtifactResult:
 
 
 def remove_artifacts(
-    ced: CanonicalExtractedDocument, reflow_result: ReflowResult
+    ced: CanonicalExtractedDocument,
+    reflow_result: ReflowResult,
+    *,
+    rejected_table_segment_ids: frozenset[str] = frozenset(),
 ) -> ArtifactResult:
     """Detect and remove non-semantic artifacts from ``reflow_result``'s units.
     Deterministic; never mutates ``ced``; never considers a segment absent from
-    ``reflow_result`` (table-owned content is structurally excluded upstream)."""
-    return _Detector(ced, reflow_result).run()
+    ``reflow_result`` (table-owned content is structurally excluded upstream).
+
+    ``rejected_table_segment_ids`` are segments returned to ordinary processing because
+    a table reconstruction over them was explicitly rejected (T070, B4). Such a
+    segment defaults to **KEEP** for every generic artifact classification — its
+    literal resembling a page number / running furniture is already explained by the
+    rejected tabular structure, which is stronger evidence than a shape match. It is
+    still recorded (``kept_due_to_ambiguity``), never silently dropped.
+    """
+    return _Detector(ced, reflow_result, rejected_table_segment_ids).run()
 
 
 @dataclass
@@ -206,10 +217,14 @@ class _Decision:
 
 class _Detector:
     def __init__(
-        self, ced: CanonicalExtractedDocument, reflow_result: ReflowResult
+        self,
+        ced: CanonicalExtractedDocument,
+        reflow_result: ReflowResult,
+        rejected_table_segment_ids: frozenset[str] = frozenset(),
     ) -> None:
         self.ced = ced
         self.reflow_result = reflow_result
+        self.rejected_table_ids = frozenset(rejected_table_segment_ids)
         self.by_id: dict[str, AcceptedSegment] = {
             s.segment_id: s for s in ced.accepted_segments
         }
@@ -358,11 +373,8 @@ class _Detector:
             keep_reasons: list[str] = []
             if len(pages) < GENERIC_FURNITURE_MIN_OCCURRENCES:
                 keep_reasons.append(
-                    f"only {len(pages)} qualifying occurrence(s); generic "
-                    "repetition-based header/footer removal needs at least "
-                    f"{GENERIC_FURNITURE_MIN_OCCURRENCES} — 2 contiguous "
-                    "position-consistent occurrences are ambiguous, not proof of "
-                    "running furniture"
+                    f"only {len(pages)} qualifying occurrence(s) (needs at least "
+                    f"{GENERIC_FURNITURE_MIN_OCCURRENCES})"
                 )
             if self._body_contains(key, exclude_ids):
                 keep_reasons.append(
@@ -373,17 +385,33 @@ class _Detector:
                     "a carried heading/caption hint marks this as meaningful content"
                 )
             if not contiguous_run:
-                keep_reasons.append(
-                    "the occurrence pages are discontinuous — a continuous running "
-                    "header/footer cannot be established from a discontinuous set"
-                )
+                keep_reasons.append("the occurrence pages are discontinuous")
             if not majority:
                 keep_reasons.append(
                     "the text repeats on only a minority of the selected pages"
                 )
+            if any(u.segment_ids[0] in self.rejected_table_ids for u in units):
+                keep_reasons.append(
+                    "the text was returned to ordinary processing after a table "
+                    "reconstruction over it was rejected (B4)"
+                )
 
-            remove = not keep_reasons
-            note = "; ".join(keep_reasons) or None
+            # H1: generic repeated text at a stable margin position is an artifact
+            # *candidate* only. No deterministic artifact-specific signal available at
+            # this stage can safely tell a running header/footer apart from legitimate
+            # repeated author text (a recurring section title, a "Terms and
+            # Conditions" banner). Deleting author content is the worse error
+            # (FR-010) — so a generic repeat is always KEPT and recorded, never
+            # removed. Genuinely-evidenced page numbers (``_detect_page_numbers``)
+            # keep their own independent removal authority.
+            keep_reasons.insert(
+                0,
+                "generic repeated text + stable position is not independent "
+                "artifact-specific evidence; no deterministic signal distinguishes it "
+                "from legitimate repeated author content (H1)",
+            )
+            remove = False
+            note = "; ".join(keep_reasons)
             for u in units:
                 self._decided[u.segment_ids[0]] = _Decision(
                     unit=u, element_type=element_type, reason="matched_repeated",
@@ -421,6 +449,22 @@ class _Detector:
                 continue
             if self._margin_band(u) is None:
                 continue  # value evidence alone is not enough — position corroborates
+            if sid in self.rejected_table_ids:
+                # B4: a segment returned to ordinary processing because a table
+                # reconstruction over it was rejected. A bare integer / "Page n" that
+                # is really a rejected table cell must not now be deleted as a physical
+                # page number — the rejected tabular structure is stronger evidence
+                # than the shape match. KEEP, recorded.
+                self._decided[sid] = _Decision(
+                    unit=u, element_type="page_number", reason="matched_pattern",
+                    remove=False, kept_due_to_ambiguity=True,
+                    note=(
+                        "page-number-shaped literal from a region whose table "
+                        "reconstruction was rejected — retained; the rejected tabular "
+                        "structure outweighs the shape match (B4)"
+                    ),
+                )
+                continue
             self._decided[sid] = _Decision(
                 unit=u, element_type="page_number", reason="matched_pattern",
                 remove=True, kept_due_to_ambiguity=False,

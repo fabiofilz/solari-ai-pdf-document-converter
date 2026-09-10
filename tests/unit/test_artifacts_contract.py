@@ -218,7 +218,11 @@ def test_table_owned_segments_are_never_considered_removable():
 # --- ambiguity: repeated header text that is also legitimate body content -------------
 
 
-def test_a_truly_repeated_header_over_three_pages_with_no_body_collision_is_removed():
+def test_a_truly_repeated_header_over_three_pages_is_kept_without_independent_evidence():
+    # H1: repetition + stable margin position identifies an artifact *candidate*, but
+    # is not deletion authority. No deterministic artifact-specific signal at this
+    # stage distinguishes a running header from legitimate repeated author text — so
+    # it is KEPT and recorded (never silently dropped).
     a = _artifacts()
     doc = ced([
         Seg("h1", "ACME CORP — CONFIDENTIAL", (72, 30, 452, 42), page=1),
@@ -230,9 +234,9 @@ def test_a_truly_repeated_header_over_three_pages_with_no_body_collision_is_remo
     ])
     result = a.remove_artifacts(doc, _reflow(doc))
     kept = {s for u in result.kept_units for s in u.segment_ids}
-    assert {"h1", "h2", "h3"}.isdisjoint(kept)
+    assert {"h1", "h2", "h3"} <= kept
     entries = [e for e in result.removal_log.entries if e.entry_type == "running_header"]
-    assert entries and all(not e.ambiguous for e in entries)
+    assert entries and all(e.ambiguous for e in entries)
 
 
 def test_two_page_contiguous_repeated_header_is_kept_as_ambiguous():

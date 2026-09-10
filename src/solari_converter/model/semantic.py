@@ -136,3 +136,14 @@ class SemanticDocument:
     #: is the cross-page single-logical-table guarantee the collapsed header sits
     #: inside. Additive; no schema (this model is ephemeral).
     collapsed_headers: tuple[CollapsedHeader, ...] = ()
+    #: T070 identical-evidence lineage (ephemeral; no schema). Each frozenset is the
+    #: complete provenance of one retained logical table cell into which T070 collapsed
+    #: two or more **byte-identical** source literals (the R1 identical-evidence rule).
+    #: ``build_semantic.literal_accounting_violations`` consults this — and only this —
+    #: to let one rendered literal stand for several provenance ids in a table cell.
+    table_identical_evidence_groups: tuple[frozenset[str], ...] = ()
+    #: Segment ids of hinted table regions whose reconstruction T070 **rejected**
+    #: (same-anchor literal collision / uncorroborated grid) so the region fell back to
+    #: ordinary prose (ephemeral; no schema). Carried so the removal log can explain why
+    #: such a segment was *not* removed even when its literal resembles page furniture.
+    rejected_table_segment_ids: frozenset[str] = field(default_factory=frozenset)

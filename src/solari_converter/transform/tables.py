@@ -315,6 +315,21 @@ class TablesResult:
     hint_decisions: tuple[HintDecision, ...] = ()
     transforms: tuple[SegmentTransform, ...] = ()
     consumed_segment_ids: frozenset[str] = field(default_factory=frozenset)
+    #: One frozenset per retained logical table cell into which two or more
+    #: **byte-identical** source literals were collapsed (the R1 identical-evidence
+    #: rule — the only same-anchor collapse this pass permits). Each set is the *full*
+    #: provenance of that cell. Downstream exact-carrier reconstruction
+    #: (``build_semantic.literal_accounting_violations``) consults this — and only
+    #: this — before letting one rendered literal stand for several provenance ids in
+    #: a table cell. Generic duplicate text / duplicate provenance is never sufficient.
+    identical_evidence_groups: tuple[frozenset[str], ...] = ()
+    #: Segment ids of every hinted table region whose reconstruction was **rejected**
+    #: (same-anchor literal collision, uncorroborated grid, no recoverable columns) and
+    #: that consequently fell back to ordinary non-table semantic processing. Ephemeral
+    #: (never a committed schema field). Nothing here is consumed by a table. T071 uses
+    #: it to keep a returned-to-prose fragment from being silently re-classified as
+    #: page furniture merely because its literal also resembles one (FR-010 / B4).
+    rejected_table_segment_ids: frozenset[str] = field(default_factory=frozenset)
 
 
 # --- geometry helpers (pure) ------------------------------------------------------
@@ -530,6 +545,8 @@ class _Builder:
         self.collapsed_headers: list[CollapsedHeader] = []
         self.structural_reorder: list[StructuralReorder] = []
         self.consumed: set[str] = set()
+        self.identical_evidence: list[frozenset[str]] = []
+        self.rejected_region_ids: set[str] = set()
 
     # -- helpers ------------------------------------------------------------
 
@@ -560,6 +577,16 @@ class _Builder:
         logical = self._stitch(fragments)
         blocks = self._finalise(logical)
 
+        consumed = frozenset(self.consumed)
+        identical = tuple(
+            sorted(
+                (
+                    g for g in _maximal_frozensets(self.identical_evidence)
+                    if g <= consumed
+                ),
+                key=lambda g: tuple(sorted(g)),
+            )
+        )
         return TablesResult(
             blocks=tuple(blocks),
             structural_reorder=tuple(self.structural_reorder),
@@ -570,7 +597,9 @@ class _Builder:
             ),
             hint_decisions=tuple(sorted(self.hint_decisions, key=_hint_decision_key)),
             transforms=tuple(self.transforms),
-            consumed_segment_ids=frozenset(self.consumed),
+            consumed_segment_ids=consumed,
+            identical_evidence_groups=identical,
+            rejected_table_segment_ids=frozenset(self.rejected_region_ids) - consumed,
         )
 
     # -- fragment construction ------------------------------------------
@@ -594,6 +623,11 @@ class _Builder:
                 frag = self._build_fragment(page, group)
                 if frag is not None:
                     fragments.append(frag)
+                else:
+                    # a hinted region whose reconstruction was rejected — it now flows
+                    # to ordinary non-table semantic processing (B4). Record every id
+                    # so T071 keeps it from being re-classified as page furniture.
+                    self.rejected_region_ids.update(s.segment_id for s in group)
         # global order: by first accepted index of any of the fragment's segments
         fragments.sort(
             key=lambda f: (
@@ -816,6 +850,7 @@ class _Builder:
                             "literal, every contributing id retained",
                         )
                     )
+                    self.identical_evidence.append(frozenset(anchors[key].provenance))
                     continue
                 # R1: two source literals that are NOT codepoint-identical at one
                 # anchor. Appending the second id to provenance while its literal has
@@ -1384,3 +1419,16 @@ def _mean_ratio(a_row, b_row) -> float:
 def _dedup(ids: list[str]) -> list[str]:
     seen: set[str] = set()
     return [x for x in ids if not (x in seen or seen.add(x))]
+
+
+def _maximal_frozensets(sets: list[frozenset[str]]) -> list[frozenset[str]]:
+    """Drop any set that is a strict subset of another (an identical-evidence cell
+    that collapsed N segments appends {s0,s1}, then {s0,s1,s2}, … — only the widest is
+    the true group). Order-independent; deterministic."""
+    out: list[frozenset[str]] = []
+    for s in sets:
+        if any(s < t for t in sets):
+            continue
+        if s not in out:
+            out.append(s)
+    return out
