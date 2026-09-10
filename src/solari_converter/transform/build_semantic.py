@@ -274,8 +274,12 @@ def literal_accounting_violations(
     The reconstructed text must equal the carrier's rendered text **exactly**. No
     unrecorded prefix / suffix / interior insertion passes; no occurrence satisfies
     two source contributions; a duplicated literal needs two rendered copies **unless**
-    T070 explicitly collapsed byte-identical evidence into one cell
-    (``table_identical_evidence_groups``) — the one narrow, lineage-backed exception.
+    the current carrier is the exact retained table cell into which T070 collapsed
+    byte-identical evidence and that group authenticates against the real cell
+    (:func:`_authenticated_ident_groups`, B1) — the one narrow, cell-local,
+    provenance-authenticated exception. It is impossible in a paragraph / heading /
+    clause / list item, cannot span cells, and cannot be borrowed from
+    ``table_identical_evidence_groups`` alone.
 
     On a carrier mismatch, blame is attributed per segment by ordered substring
     alignment of each segment's own delivered contribution; an insertion/reorder that
@@ -290,9 +294,15 @@ def literal_accounting_violations(
         if t.joined_with:
             tx_by_right.setdefault(t.joined_with, []).append(t)
 
-    ident_groups = tuple(
+    # B1 — the identical-evidence exception is authenticated against the *actual*
+    # retained table cells, never trusted from ``table_identical_evidence_groups``
+    # alone: a group is usable only when a real rendered table cell owns exactly it,
+    # its literals are codepoint-identical, T070 recorded it, and no other semantic
+    # carrier owns any member (see :func:`_authenticated_ident_groups`).
+    recorded_ident = tuple(
         frozenset(g) for g in semantic.table_identical_evidence_groups
     )
+    authentic_ident = _authenticated_ident_groups(semantic, ced)
 
     carriers = [
         (b.kind == "table", tuple(prov), text)
@@ -304,29 +314,121 @@ def literal_accounting_violations(
     violations: set[str] = set()
     for is_table, prov, text in carriers:
         violations |= _carrier_violations(
-            text, prov, is_table, ced_text, tx_by_right, ident_groups
+            text, prov, is_table, ced_text, tx_by_right, authentic_ident
         )
 
-    # B2: a ``dehyphenate`` record whose named participants never sit adjacent, in
-    # source order, inside one carrier — or that is otherwise malformed — is a
-    # violation on its own, even when some carrier's text coincidentally matches.
+    # B1 — a recorded identical-evidence group that does not authenticate against a
+    # real retained table cell is fabricated lineage on its own, even if no carrier
+    # tried to use it.
+    for g in recorded_ident:
+        if g not in authentic_ident:
+            violations |= {s for s in g if s in ced_text} or set(g)
+
+    # B2 — a ``dehyphenate`` record whose named participants are not exactly one
+    # carrier's ordered provenance prefix through the joined-right segment — or that is
+    # otherwise malformed, carries duplicate ids, or conflicts with another
+    # dehyphenate record on the same boundary / ``joined_with`` — is a violation on its
+    # own, even when some carrier's text coincidentally matches.
     carrier_prov = [prov for _t, prov, _x in carriers]
-    for t in semantic.segment_transforms:
-        if t.kind == "dehyphenate":
-            violations |= _malformed_dehyphenate(t, carrier_prov, ced_text)
+    deh_transforms = [
+        t for t in semantic.segment_transforms if t.kind == "dehyphenate"
+    ]
+    joined_counts: dict[str, int] = {}
+    boundary_counts: dict[tuple[str, str], int] = {}
+    for t in deh_transforms:
+        sids = tuple(t.segment_ids or ())
+        if t.joined_with:
+            joined_counts[t.joined_with] = joined_counts.get(t.joined_with, 0) + 1
+        if len(sids) >= 2:
+            key = (sids[-2], sids[-1])
+            boundary_counts[key] = boundary_counts.get(key, 0) + 1
+    for t in deh_transforms:
+        sids = tuple(t.segment_ids or ())
+        violations |= _malformed_dehyphenate(t, carrier_prov, ced_text)
+        if (t.joined_with and joined_counts.get(t.joined_with, 0) > 1) or (
+            len(sids) >= 2 and boundary_counts.get((sids[-2], sids[-1]), 0) > 1
+        ):
+            violations |= {s for s in sids if s in ced_text}
 
     return sorted(violations)
 
 
+def _authenticated_ident_groups(
+    semantic: SemanticDocument, ced: CanonicalExtractedDocument
+) -> set[frozenset[str]]:
+    """B1 — the set of identical-evidence groups that may authorise one rendered
+    literal standing for several provenance ids **in the exact table cell that
+    generated the collapse**.
+
+    A group qualifies only when a real retained :class:`TableCell` in
+    ``semantic.blocks`` has provenance whose id set is *exactly* that group and:
+
+    * the cell holds at least two **distinct** accepted CED segment ids;
+    * every one of those ids' stored CED literals is codepoint-identical, and the
+      cell's rendered text equals that shared literal;
+    * no id in the group belongs to any other semantic carrier (prose / heading /
+      clause / list-item provenance or another table cell);
+    * no id in the group is a rejected-table fragment id;
+    * T070 actually recorded the group in ``table_identical_evidence_groups``
+      (genuine same-anchor identical-evidence lineage, not a hand-injected set).
+
+    The exception is therefore impossible outside a table cell, cannot span cells,
+    and cannot be borrowed by a paragraph / heading / clause / list item.
+    """
+    ced_text = _ced_literals(ced)
+    accepted = set(ced.accepted_reading_order)
+    recorded = {frozenset(g) for g in semantic.table_identical_evidence_groups}
+    rejected = set(semantic.rejected_table_segment_ids)
+
+    owner_count: dict[str, int] = {}
+    for b in semantic.blocks:
+        for _text, prov in _carrier_units(b):
+            for sid in set(prov):
+                owner_count[sid] = owner_count.get(sid, 0) + 1
+
+    authentic: set[frozenset[str]] = set()
+    for b in semantic.blocks:
+        if b.kind != "table":
+            continue
+        for row in b.table.rows:
+            for c in row:
+                prov = tuple(c.provenance)
+                uniq = set(prov)
+                if len(prov) < 2 or len(uniq) < 2:
+                    continue
+                if not uniq <= accepted:
+                    continue
+                lits = {ced_text.get(s) for s in uniq}
+                if len(lits) != 1 or None in lits:
+                    continue
+                if c.text != next(iter(lits)):
+                    continue
+                if uniq & rejected:
+                    continue
+                if any(owner_count.get(s, 0) != 1 for s in uniq):
+                    continue
+                g = frozenset(uniq)
+                if g in recorded:
+                    authentic.add(g)
+    return authentic
+
+
 def _dehyphenate_participants(
     t: SegmentTransform,
-    carrier_index: dict[str, int],
+    carrier_prov: tuple[str, ...],
     ced_text: dict[str, str],
 ) -> tuple[str, str] | None:
     """B2 — validate one ``dehyphenate`` transform against the carrier currently under
-    reconstruction (``carrier_index`` maps that carrier's segment ids to positions).
-    Returns ``(left_id, right_id)`` when **every** frozen contract field holds, else
-    ``None`` (record does not apply here / is malformed)."""
+    reconstruction (``carrier_prov`` is that carrier's ordered provenance). Returns
+    ``(left_id, right_id)`` when **every** frozen contract field holds, else ``None``
+    (record does not apply here / is malformed).
+
+    The frozen Stage-3 generation contract (``reflow._join``:
+    ``segment_ids = tuple(unit_ids_so_far) + (right,)``) means a well-formed record's
+    ``segment_ids`` is *exactly* the hosting carrier's ordered provenance prefix up to
+    and including the joined-right segment — never a subset of two IDs, never with an
+    unrelated prefix / suffix ID, never out of carrier order, never with a duplicate.
+    """
     if t.kind != "dehyphenate":
         return None
     if t.permitted_by != _DEHYPHENATE_RULE or t.stage != _DEHYPHENATE_STAGE:
@@ -334,13 +436,19 @@ def _dehyphenate_participants(
     sids = tuple(t.segment_ids or ())
     if len(sids) < 2 or t.joined_with is None or sids[-1] != t.joined_with:
         return None
-    left, right = sids[-2], sids[-1]
+    if len(set(sids)) != len(sids):
+        return None  # no duplicate participant ids
+    right = sids[-1]
+    if right not in carrier_prov:
+        return None
+    ri = carrier_prov.index(right)
+    if ri < 1:
+        return None
+    if sids != tuple(carrier_prov[: ri + 1]):
+        return None  # must be exactly this carrier's provenance prefix through right
+    left = sids[-2]  # == carrier_prov[ri - 1]: adjacent, left immediately before right
     if left == right:
         return None
-    if left not in carrier_index or right not in carrier_index:
-        return None
-    if carrier_index[right] != carrier_index[left] + 1:
-        return None  # participants must be adjacent, left immediately before right
     if not ced_text.get(left, "").endswith(_HYPHEN):
         return None  # the only permitted mutation is dropping a trailing U+002D
     return (left, right)
@@ -352,21 +460,26 @@ def _carrier_violations(
     is_table: bool,
     ced_text: dict[str, str],
     tx_by_right: dict[str, list[SegmentTransform]],
-    ident_groups: tuple[frozenset[str], ...],
+    authentic_groups: set[frozenset[str]],
 ) -> set[str]:
     """Reconstruct one carrier's expected text from its ordered provenance + permitted
     transforms and compare it, codepoint-exact, to ``actual``. Returns the blamed
     segment ids (empty ⇒ the carrier reconstructs exactly)."""
     lits = [ced_text.get(p, "") for p in provenance]
-    index = {p: i for i, p in enumerate(provenance)}
+    prov_set = set(provenance)
 
     def _ident_sibling(i: int) -> bool:
-        if i == 0:
+        # The identical-evidence collapse exception is table-cell-only and
+        # provenance-authenticated: the whole group must be owned by *this* cell and
+        # already validated by :func:`_authenticated_ident_groups` (B1).
+        if i == 0 or not is_table:
             return False
         a, b = provenance[i - 1], provenance[i]
         if not lits[i] or lits[i] != lits[i - 1]:
             return False
-        return any(a in g and b in g for g in ident_groups)
+        return any(
+            a in g and b in g and g <= prov_set for g in authentic_groups
+        )
 
     dehyph_left: set[str] = set()
     expected = lits[0] if lits else ""
@@ -378,7 +491,7 @@ def _carrier_violations(
         deh = None
         if not is_table:
             for t in tx_by_right.get(pid, ()):
-                v = _dehyphenate_participants(t, index, ced_text)
+                v = _dehyphenate_participants(t, provenance, ced_text)
                 if v is not None and v[0] == provenance[i - 1]:
                     deh = v
                     break
@@ -429,23 +542,34 @@ def _malformed_dehyphenate(
     carrier_prov: list[tuple[str, ...]],
     ced_text: dict[str, str],
 ) -> set[str]:
-    """B2 — a ``dehyphenate`` record that no carrier can host well-formed (wrong rule /
-    stage, fabricated shape, participants split across carriers or not adjacent, left
-    literal without a trailing ``U+002D``) is a violation on its own."""
+    """B2 — a ``dehyphenate`` record that no carrier can host well-formed is a
+    violation on its own: wrong rule / stage / shape, duplicate participant ids, or
+    ``segment_ids`` that is not *exactly* one carrier's ordered provenance prefix
+    through the joined-right segment (participants split across carriers, an unrelated
+    prefix / suffix id, wrong order), or a left literal without a trailing ``U+002D``.
+    """
     sids = tuple(t.segment_ids or ())
     named = {s for s in sids if s in ced_text}
     if t.permitted_by != _DEHYPHENATE_RULE or t.stage != _DEHYPHENATE_STAGE:
         return named
     if len(sids) < 2 or t.joined_with is None or sids[-1] != t.joined_with:
         return named
-    left, right = sids[-2], sids[-1]
-    for prov in carrier_prov:
-        idx = {p: i for i, p in enumerate(prov)}
-        if left in idx and right in idx and idx[right] == idx[left] + 1:
-            if not ced_text.get(left, "").endswith(_HYPHEN):
-                return {left} & set(ced_text)
-            return set()
-    return {left, right} & set(ced_text)
+    if len(set(sids)) != len(sids):
+        return named  # duplicate participant ids
+    right = sids[-1]
+    hosts = [
+        prov
+        for prov in carrier_prov
+        if right in prov
+        and prov.index(right) >= 1
+        and sids == tuple(prov[: prov.index(right) + 1])
+    ]
+    if len(hosts) != 1:
+        return named  # not exactly one carrier's prefix-through-right
+    left = sids[-2]
+    if not ced_text.get(left, "").endswith(_HYPHEN):
+        return {left} & set(ced_text)
+    return set()
 
 
 def _anchor(block: Block, accepted_index: dict[str, int]) -> int:
