@@ -40,22 +40,38 @@ from solari_converter.model.semantic import (
     SemanticDocument,
     block_id,
 )
-from solari_converter.reconcile.confidence import comparison_key
 from solari_converter.transform.artifacts import remove_artifacts
 from solari_converter.transform.lists import ClauseNode, ListItemNode, reconstruct_lists
 from solari_converter.transform.reflow import ReflowResult, reflow
 from solari_converter.transform.structure import infer_structure
 from solari_converter.transform.tables import StructuralReorder, TableBlock, build_tables
 
-__all__ = ["build_semantic", "literal_accounting_violations", "LiteralAccountingError"]
+__all__ = [
+    "build_semantic",
+    "literal_accounting_violations",
+    "accepted_partition_violations",
+    "LiteralAccountingError",
+    "AcceptedPartitionError",
+]
+
+#: The one line-boundary hyphen a ``dehyphenate`` transform is allowed to drop (§27).
+_HYPHEN = "-"
 
 
 class LiteralAccountingError(ValueError):
     """Raised when the R8 literal-level fidelity invariant is violated — a source
     segment is nominally retained (its id sits in a block's provenance, and it is
-    neither collapsed nor artifact-removed) yet its literal has silently vanished
-    from the rendered-semantic content with no permitted transform to account for it.
-    This is the R1 class of defect; it must never pass unnoticed."""
+    neither collapsed nor artifact-removed) yet its **exact** stored literal has no
+    representation in the rendered-semantic content and no permitted line-boundary
+    transform accounts for the delta. This is the R1 class of defect; it must never
+    pass unnoticed."""
+
+
+class AcceptedPartitionError(ValueError):
+    """Raised when the R8 accepted-ID partition invariant is violated — some accepted
+    CED segment id is not in exactly one terminal ownership state (retained /
+    collapsed / removed), or the three sets are not pairwise disjoint, or their union
+    is not exactly the accepted-id set."""
 
 
 def build_semantic(ced: CanonicalExtractedDocument) -> SemanticDocument:
@@ -104,30 +120,34 @@ def build_semantic(ced: CanonicalExtractedDocument) -> SemanticDocument:
         collapsed_headers=tuple(tables_result.collapsed_headers),
     )
 
-    # R8 — the literal-level fidelity invariant, enforced at the semantic boundary so
-    # the R1 class of silent literal disappearance can never pass unnoticed.
+    # R8-A — the accepted-ID partition invariant (retained ⊎ collapsed ⊎ removed ==
+    # accepted, pairwise disjoint), enforced at runtime in the semantic build, not
+    # tests only.
+    partition = accepted_partition_violations(semantic, ced)
+    if partition:
+        raise AcceptedPartitionError(
+            "accepted-ID terminal-ownership partition violated: "
+            + "; ".join(f"{k}={v}" for k, v in sorted(partition.items()))
+        )
+
+    # R8-B/C/D — the exact literal-level fidelity invariant, enforced at the semantic
+    # boundary so the R1 class of silent literal mutation / disappearance can never
+    # pass unnoticed.
     offenders = literal_accounting_violations(semantic, ced)
     if offenders:
         raise LiteralAccountingError(
-            "retained-in-provenance source segments whose literal has no rendered "
-            f"representation and no permitted transform: {offenders}"
+            "retained-in-provenance source segments whose exact literal has no "
+            f"rendered representation and no permitted transform: {offenders}"
         )
     return semantic
 
 
-# --- R8: literal-level semantic accounting invariant --------------------------------
-
-
-def _norm(text: str) -> str:
-    """The module-wide comparison-only normal form (NFC → smart-quote fold →
-    whitespace-collapse) plus casefold — the same non-materiality bar
-    ``transform/tables.py`` uses for repeated-header collapse. Never stored."""
-    return comparison_key(text).casefold()
+# --- R8: exact literal-level semantic accounting invariants -------------------------
 
 
 def _carrier_units(block: Block) -> list[tuple[str, tuple[str, ...]]]:
     """``(rendered-text, contributing-segment-ids)`` pairs for one block — the units
-    whose text must still carry each of their provenance segments' literals."""
+    whose text must still carry each of their provenance segments' **exact** literals."""
     if block.kind == "table":
         return [
             (c.text, c.provenance)
@@ -138,63 +158,132 @@ def _carrier_units(block: Block) -> list[tuple[str, tuple[str, ...]]]:
     return [(block.text, block.provenance)]  # heading / paragraph / clause
 
 
-def literal_accounting_violations(
-    semantic: SemanticDocument, ced: CanonicalExtractedDocument
-) -> list[str]:
-    """The R8 fidelity invariant — strictly stronger than the set-level
-    ``retained ⊎ collapsed ⊎ removed == accepted``.
-
-    **Invariant.** For every accepted segment that is *nominally retained* — its id
-    appears in some block's ``provenance`` and it is neither in
-    ``collapsed_segment_ids`` nor in ``removed_segment_ids`` — its CED literal MUST
-    still be represented in the rendered-semantic content:
-
-    * its normalised literal is a substring of the normalised text of some carrier
-      unit (paragraph / heading / clause / list item / table cell) that names it in
-      provenance — **or**
-    * the segment participates in a recorded ``dehyphenate`` :class:`SegmentTransform`
-      (the one closed-enum transform that legitimately changes a segment's own
-      characters at a line boundary; ``reflow_whitespace`` only inserts a separator
-      *between* literals, so the substring check still holds under whitespace
-      normalisation).
-
-    Whitespace-, case- and smart-quote-only differences are non-material (the frozen
-    ``comparison_key`` rule, casefolded — the same bar this pipeline already uses for
-    repeated-header collapse). Anything else — an id retained in provenance whose
-    literal has silently disappeared — is a violation (the R1 class).
-
-    Returns the sorted list of offending segment ids; empty ⇒ the invariant holds.
-    """
-    ced_text = {s.segment_id: s.text for s in ced.accepted_segments}
-
-    boundary_changed = {
-        sid
-        for t in semantic.segment_transforms
-        if t.kind == "dehyphenate"
-        for sid in t.segment_ids
-    }
-
-    carriers: dict[str, list[str]] = {}
-    for b in semantic.blocks:
-        for text, prov in _carrier_units(b):
-            normalised = _norm(text)
-            for sid in prov:
-                carriers.setdefault(sid, []).append(normalised)
-
-    retained = (
+def _retained_ids(semantic: SemanticDocument) -> set[str]:
+    return (
         {sid for b in semantic.blocks for sid in b.provenance}
         - set(semantic.collapsed_segment_ids)
         - set(semantic.removed_segment_ids)
     )
 
+
+def _dehyphenation_pairs(
+    semantic: SemanticDocument,
+) -> list[tuple[str, str]]:
+    """``(left_id, right_id)`` for every recorded ``dehyphenate`` transform. ``reflow``
+    builds the transform's ``segment_ids`` as ``(*unit_ids_so_far, right_id)`` with
+    ``joined_with == right_id``, so the hyphen-dropped *left* segment is the
+    second-to-last id and the *right* segment is the last (== ``joined_with``)."""
+    pairs: list[tuple[str, str]] = []
+    for t in semantic.segment_transforms:
+        if t.kind != "dehyphenate" or len(t.segment_ids) < 2:
+            continue
+        pairs.append((t.segment_ids[-2], t.joined_with or t.segment_ids[-1]))
+    return pairs
+
+
+def accepted_partition_violations(
+    semantic: SemanticDocument, ced: CanonicalExtractedDocument
+) -> dict[str, list[str]]:
+    """R8-A. Every accepted CED segment id must be in **exactly one** terminal
+    ownership state — ``retained`` (id in some block provenance, not collapsed, not
+    removed), ``collapsed`` (``collapsed_segment_ids``), or ``removed``
+    (``removed_segment_ids``) — the three sets pairwise disjoint and unioning to
+    exactly the accepted-id set.
+
+    Returns a dict of non-empty violation categories (``absent`` /
+    ``retained_and_collapsed`` / ``retained_and_removed`` / ``collapsed_and_removed``
+    / ``not_accepted``), each a sorted id list; an empty dict ⇒ the partition holds.
+    """
+    accepted = set(ced.accepted_reading_order)
+    collapsed = set(semantic.collapsed_segment_ids)
+    removed = set(semantic.removed_segment_ids)
+    in_provenance = {sid for b in semantic.blocks for sid in b.provenance}
+    retained = in_provenance - collapsed - removed
+
+    out: dict[str, list[str]] = {}
+    absent = accepted - retained - collapsed - removed
+    if absent:
+        out["absent"] = sorted(absent)
+    if retained & collapsed:
+        out["retained_and_collapsed"] = sorted(retained & collapsed)
+    if retained & removed:
+        out["retained_and_removed"] = sorted(retained & removed)
+    if collapsed & removed:
+        out["collapsed_and_removed"] = sorted(collapsed & removed)
+    not_accepted = (retained | collapsed | removed) - accepted
+    if not_accepted:
+        out["not_accepted"] = sorted(not_accepted)
+    return out
+
+
+def literal_accounting_violations(
+    semantic: SemanticDocument, ced: CanonicalExtractedDocument
+) -> list[str]:
+    """The R8 **exact** literal-fidelity invariant — strictly stronger than the
+    set-level ``retained ⊎ collapsed ⊎ removed == accepted`` and stronger than the
+    previous comparison-key-equivalence check (R8: comparison normalisation may be
+    used for diagnostics, never to prove delivered fidelity).
+
+    **Invariant.** For every *nominally retained* accepted segment ``s`` (id in some
+    block's ``provenance``; not collapsed; not removed):
+
+    * **B.** If no literal-changing permitted transform applies to ``s``, its stored
+      CED literal MUST appear **verbatim** (codepoint-exact — no casefold, no
+      smart-quote fold, no punctuation or numeric-format change, no whitespace
+      normalisation) as a substring of some carrier unit (paragraph / heading /
+      clause / list item / table cell) that names ``s`` in provenance. ``reflow`` and
+      the table wrapped-line join only ever insert a separator *between* two literals,
+      so an unmodified segment's own characters survive intact.
+    * **C.** If ``s`` is the *left* participant of a recorded ``dehyphenate``
+      transform (with right participant ``r``), the single permitted boundary
+      mutation is the drop of ``s``'s trailing ``U+002D``: ``s.text`` MUST end with
+      ``-`` and ``s.text[:-1] + r.text`` MUST appear verbatim in a carrier naming
+      both. Merely appearing in a ``dehyphenate`` record exempts nothing — an
+      arbitrary replacement (``abcdef`` → ``TOTAL REPLACEMENT``) still fails. The
+      *right* participant keeps every character and is checked by rule B.
+    * **D.** Collapsed and removed segments are out of scope here **only** because
+      they carry their own explicit lineage (``CollapsedHeader`` / ``RemovalLog``);
+      provenance membership alone is never treated as sufficient.
+
+    Returns the sorted list of offending segment ids; empty ⇒ the invariant holds.
+    """
+    ced_text = {s.segment_id: s.text for s in ced.accepted_segments}
+
+    carriers: dict[str, list[str]] = {}
+    for b in semantic.blocks:
+        for text, prov in _carrier_units(b):
+            for sid in prov:
+                carriers.setdefault(sid, []).append(text)
+
+    dehyph_pairs = _dehyphenation_pairs(semantic)
+    dehyph_left = {left for left, _r in dehyph_pairs}
+
+    retained = _retained_ids(semantic)
+
     violations: list[str] = []
     for sid in sorted(retained):
-        if sid in boundary_changed:
-            continue
-        literal = _norm(ced_text.get(sid, ""))
-        if not literal:
+        literal = ced_text.get(sid, "")
+        if literal == "" or literal.strip() == "":
             continue  # an empty / whitespace-only literal contributes no characters
-        if any(literal in carrier for carrier in carriers.get(sid, [])):
+        my_carriers = carriers.get(sid, [])
+
+        if sid in dehyph_left:
+            # C: validate the exact allowed line-boundary mutation.
+            ok = False
+            for left, right in dehyph_pairs:
+                if left != sid or not literal.endswith(_HYPHEN):
+                    continue
+                expected = literal[:-1] + ced_text.get(right, "")
+                if any(expected in c for c in my_carriers):
+                    ok = True
+                    break
+            if ok:
+                continue
+            violations.append(sid)
+            continue
+
+        # B: verbatim (codepoint-exact) contribution required.
+        if any(literal in c for c in my_carriers):
             continue
         violations.append(sid)
     return violations

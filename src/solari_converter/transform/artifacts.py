@@ -20,11 +20,20 @@ Hard guarantees
 * **stricter than T070's stitch transparency** — this module does **not** import or
   reuse ``transform.tables``'s ``_is_transparent`` rule (which only answers "may a
   table stitch ignore this segment", a much weaker question). This module defines its
-  own independent, stricter evidence: exact comparison-key repetition, a required
-  minimum-page threshold, a *majority*-of-pages requirement, bbox-top position
-  consistency, and — critically — a **margin-band** requirement (the segment must sit
-  at the very top or very bottom of its own page's accepted content) that stitch
-  transparency never checks;
+  own independent, stricter evidence: exact comparison-key repetition, a *majority*-of-
+  pages requirement, bbox-top position consistency, contiguity of the occurrence
+  pages, and — for generic repetition-based furniture removal — a minimum of
+  ``GENERIC_FURNITURE_MIN_OCCURRENCES`` (3) qualifying occurrences (R2). Exactly two
+  contiguous position-consistent occurrences are ambiguous: kept and recorded, never
+  removed;
+* **margin band is corroboration, not authority** — ``_margin_band`` is derived from
+  a page's own accepted-content extrema, not from physical page geometry. It is used
+  only as *extra* corroboration for content that already carries independent positive
+  evidence (explicit page-number evidence). It is **never** the deciding signal for
+  authentication / hash / barcode-like text: such text matches a shape pattern only,
+  and no deterministic artifact-specific signal available at T071 can safely tell it
+  apart from quoted author content — so it is always retained and logged ambiguous
+  (R3);
 * **whole-unit** — a :class:`~solari_converter.transform.reflow.ReflowUnit` is removed
   only when it is a single-segment, standalone unit that itself carries the removal
   evidence. A unit that wrapped multiple segments together (e.g. a repeated header line
@@ -33,8 +42,9 @@ Hard guarantees
 * **never removes on shape alone** — verticality (tall/narrow bbox) is never, by
   itself, removal evidence. A bare number is never removed without positive
   page-number evidence (an explicit prefix, a physical-page match, or an adjacent-page
-  sequence) *and* margin-band positioning. Years, prices, section/clause numbers, and
-  legal references never match any removal family.
+  sequence) *and* margin-band positioning. Years, prices, section/clause numbers,
+  legal references, and authentication/hash/barcode-like text never trigger automatic
+  removal.
 
 Thresholds are **named module constants** — not ``Config`` fields, not CLI options, not
 folded into run identity, matching ``transform/tables.py``'s and ``transform/reflow.py``'s
@@ -53,6 +63,7 @@ from solari_converter.transform.reflow import ReflowResult, ReflowUnit
 
 __all__ = [
     "HEADER_FOOTER_MIN_PAGES",
+    "GENERIC_FURNITURE_MIN_OCCURRENCES",
     "FURNITURE_TOP_TOLERANCE",
     "MARGIN_BAND_TOLERANCE",
     "SUBSTRING_COLLISION_MIN_LENGTH",
@@ -70,11 +81,19 @@ __all__ = [
 
 # --- frozen thresholds (module constants; NOT Config; run identity unchanged) --------
 
-#: A repeated running header/footer needs at least this many distinct physical-page
-#: occurrences. Independent of, and stricter overall than, T070's stitch-transparency
-#: 2-page threshold — combined below with a majority requirement and margin-band /
-#: position-consistency checks stitch transparency never applies.
+#: Below this many distinct physical-page occurrences there is nothing to reason about
+#: — a single occurrence cannot even raise the question of repetition, so no furniture
+#: record is produced at all.
 HEADER_FOOTER_MIN_PAGES: int = 2
+
+#: R2: generic *repetition-based* header/footer **removal** requires at least this many
+#: qualifying occurrences. Exactly 2 contiguous, position-consistent margin
+#: occurrences are ambiguous — kept and recorded, never removed, unless some other
+#: already-defined artifact-specific rule (e.g. explicit page-number evidence, handled
+#: separately) independently authorises removal. Contiguity and stable margin position
+#: remain necessary but are not, by themselves, independent evidence. No
+#: document-size-specific logic: this is an absolute occurrence count, not a ratio.
+GENERIC_FURNITURE_MIN_OCCURRENCES: int = 3
 
 #: Carried structural-hint kinds that mark a repeated segment as *meaningful content*
 #: (a recurring section title, a figure caption). Their presence weighs against
@@ -337,6 +356,14 @@ class _Detector:
             majority = len(pages) > len(self.pages) / 2
 
             keep_reasons: list[str] = []
+            if len(pages) < GENERIC_FURNITURE_MIN_OCCURRENCES:
+                keep_reasons.append(
+                    f"only {len(pages)} qualifying occurrence(s); generic "
+                    "repetition-based header/footer removal needs at least "
+                    f"{GENERIC_FURNITURE_MIN_OCCURRENCES} — 2 contiguous "
+                    "position-consistent occurrences are ambiguous, not proof of "
+                    "running furniture"
+                )
             if self._body_contains(key, exclude_ids):
                 keep_reasons.append(
                     "identical text also appears in retained body content"
@@ -409,14 +436,6 @@ class _Detector:
             text = u.text.strip()
             seg = u.segments[0]
             tall_narrow = self._is_tall_narrow(seg)
-            # R3: pattern SHAPE alone never authorizes deleting author content. A
-            # genuine authentication stamp / protocol hash / OCR barcode sits in a
-            # page margin band (the same independent, already-available deterministic
-            # geometric signal page-number removal requires). A shape-only match in
-            # mid-body — a git commit hash quoted in a technical paragraph, a
-            # "Digitally signed…" sentence, an OCR-mangled identifier inside prose —
-            # is kept, recorded as ambiguous. Verticality alone remains insufficient.
-            in_margin = self._margin_band(u) is not None
 
             phrase_or_hex = AUTH_PHRASE_RE.match(text) or AUTH_HEX_RE.match(text)
             barcode_shape = (
@@ -424,31 +443,33 @@ class _Detector:
                 and BARCODE_OCR_RUN_RE.match(text)
                 and " " not in text
             )
+            if not (phrase_or_hex or barcode_shape):
+                continue
 
-            if phrase_or_hex and in_margin:
-                element_type = "vertical_auth_text" if tall_narrow else "auth_stamp"
-                self._decided[sid] = _Decision(
-                    unit=u, element_type=element_type, reason="matched_pattern",
-                    remove=True, kept_due_to_ambiguity=False,
-                )
-                continue
-            if barcode_shape and in_margin:
-                self._decided[sid] = _Decision(
-                    unit=u, element_type="barcode", reason="matched_pattern",
-                    remove=True, kept_due_to_ambiguity=False,
-                )
-                continue
-            if phrase_or_hex or barcode_shape:
-                element_type = (
-                    "barcode" if barcode_shape and not phrase_or_hex
-                    else "vertical_auth_text" if tall_narrow
-                    else "auth_stamp"
-                )
-                self._decided[sid] = _Decision(
-                    unit=u, element_type=element_type, reason="matched_pattern",
-                    remove=False, kept_due_to_ambiguity=True,
-                    note="pattern shape only, not in a page margin band — kept",
-                )
+            # R3: a textual authentication / hash / barcode-like PATTERN, on its own,
+            # never authorises deleting author content. ``_margin_band`` is derived
+            # from this page's own accepted-content extrema — it is not physical
+            # margin evidence, and neither the first/last accepted position nor a
+            # tall/narrow bbox is independent evidence. No already-existing
+            # deterministic artifact-specific signal in the semantic/geometric data
+            # available at T071 can safely distinguish such text from a quoted commit
+            # hash, a "Digitally signed…" sentence, or an OCR-mangled identifier
+            # inside prose — so it is RETAINED and logged as ambiguous. Deleting
+            # legitimate author content is the worse error (FR-010).
+            element_type = (
+                "barcode" if barcode_shape and not phrase_or_hex
+                else "vertical_auth_text" if tall_narrow
+                else "auth_stamp"
+            )
+            self._decided[sid] = _Decision(
+                unit=u, element_type=element_type, reason="matched_pattern",
+                remove=False, kept_due_to_ambiguity=True,
+                note=(
+                    "authentication/hash/barcode-like text pattern; no independent "
+                    "deterministic artifact-specific signal distinguishes it from "
+                    "author content — retained (R3)"
+                ),
+            )
 
     @staticmethod
     def _is_tall_narrow(seg: AcceptedSegment) -> bool:

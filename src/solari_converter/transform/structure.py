@@ -170,10 +170,20 @@ def infer_structure(
             _heading_hints(ced, unit),
             key=lambda h: (h.segment_id, h.kind, h.source_technique, h.level or 0),
         )
-        # R4: conflicting *explicit* heading levels are a real disagreement. The
-        # deterministic tie-break is the source's own numbering depth — never the
-        # lexical order of the extractor names. If nothing frozen resolves the
-        # conflict, no hint is applied and no heading level is invented.
+        # R4: exactly ONE semantic decision per source block, and the *explicit*
+        # heading level always outranks unspecified (``level=None``) role hints:
+        #
+        #  * 0 explicit levels  → any corroborated hint establishes the heading role;
+        #    the level comes from the source's own numbering depth (or 1), never a
+        #    hint and never an extractor name;
+        #  * exactly 1 explicit level (+ any number of ``None`` hints) → that explicit
+        #    level is the semantic level; the ``None`` hints corroborate the role only
+        #    and never consume/override the decision;
+        #  * >1 conflicting explicit levels → resolved *only* by numbering depth
+        #    (depth ∈ explicit levels); otherwise unresolved → fall back conservatively
+        #    to body, no hint applied, no level invented.
+        #
+        # Extractor / source-technique lexical order must never choose the level.
         explicit_levels = sorted({h.level for h in hints if h.level is not None})
         conflict = len(explicit_levels) > 1
         resolved_level: int | None = (
@@ -185,68 +195,80 @@ def infer_structure(
             f"numbering={numbering!r}, title-ish={titlish})"
         )
 
-        decisions: list[HintDecision] = []
-        applied_level: int | None = None
-        applied_any = False
-        for h in hints:
-            can_apply = corroborated and not applied_any
-            if can_apply and conflict:
-                # exactly one deterministic decision per source block: apply only the
-                # hint whose explicit level the numbering depth corroborates — never
-                # the lexically-first extractor
-                can_apply = resolved_level is not None and h.level == resolved_level
+        governing: object | None = None
+        if corroborated and hints:
+            if not explicit_levels:
+                governing = hints[0]                       # role only; level ← numbering
+            elif len(explicit_levels) == 1:
+                governing = next(h for h in hints if h.level == explicit_levels[0])
+            elif resolved_level is not None:
+                governing = next(h for h in hints if h.level == resolved_level)
+            # else: unresolved explicit-level conflict → governing stays None → body
 
-            if can_apply:
-                applied_any = True
-                if h.level is not None:
-                    applied_level = h.level
+        corroboration = ", ".join(
+            sig for sig, ok in (
+                ("short", short),
+                ("single-line", single_line),
+                ("section numbering", numbering is not None),
+                ("title-case/uppercase", titlish),
+            ) if ok
+        )
+
+        decisions: list[HintDecision] = []
+        for h in hints:
+            if h is governing:
+                if h.level is not None and conflict:
+                    reason = (
+                        f"heading hint corroborated by {corroboration}; explicit "
+                        f"level {h.level} corroborated by numbering depth {depth}"
+                    )
+                elif h.level is not None:
+                    reason = (
+                        f"heading hint corroborated by {corroboration}; explicit "
+                        f"level {h.level} governs this source block"
+                    )
+                else:
+                    reason = f"heading hint corroborated by {corroboration}"
                 decisions.append(
                     HintDecision(
-                        hint_ref=_hint_ref(h), kind=h.kind, applied=True,
-                        reason=(
-                            "heading hint corroborated by "
-                            + ", ".join(
-                                sig for sig, ok in (
-                                    ("short", short),
-                                    ("single-line", single_line),
-                                    ("section numbering", numbering is not None),
-                                    ("title-case/uppercase", titlish),
-                                ) if ok
-                            )
-                            + (
-                                f"; explicit level {h.level} corroborated by "
-                                f"numbering depth {depth}"
-                                if conflict else ""
-                            )
-                        ),
+                        hint_ref=_hint_ref(h), kind=h.kind, applied=True, reason=reason
                     )
+                )
+                continue
+
+            if not corroborated:
+                reason = no_signal_reason
+            elif conflict and resolved_level is None:
+                reason = (
+                    f"conflicting explicit heading levels {explicit_levels}; no "
+                    "deterministic evidence resolves the conflict — hint not "
+                    "applied, no heading level invented"
+                )
+            elif conflict and h.level is not None and h.level != resolved_level:
+                reason = (
+                    f"explicit level {h.level} conflicts with the "
+                    f"numbering-depth-corroborated level {resolved_level}"
+                )
+            elif h.level is None and explicit_levels:
+                governing_level = (
+                    explicit_levels[0] if len(explicit_levels) == 1 else resolved_level
+                )
+                reason = (
+                    "corroborates the heading role only; the explicit level from "
+                    f"another hint ({governing_level}) governs this source block "
+                    "(one semantic decision per block)"
                 )
             else:
-                if not corroborated:
-                    reason = no_signal_reason
-                elif conflict and resolved_level is None:
-                    reason = (
-                        f"conflicting explicit heading levels {explicit_levels}; no "
-                        "deterministic evidence resolves the conflict — hint not "
-                        "applied, no heading level invented"
-                    )
-                elif conflict and h.level is not None and h.level != resolved_level:
-                    reason = (
-                        f"explicit level {h.level} conflicts with the "
-                        f"numbering-depth-corroborated level {resolved_level}"
-                    )
-                elif applied_any:
-                    reason = "another heading hint was already applied to this unit"
-                else:
-                    reason = no_signal_reason
-                decisions.append(
-                    HintDecision(
-                        hint_ref=_hint_ref(h), kind=h.kind, applied=False, reason=reason
-                    )
+                reason = "another heading hint already governs this source block"
+            decisions.append(
+                HintDecision(
+                    hint_ref=_hint_ref(h), kind=h.kind, applied=False, reason=reason
                 )
+            )
         all_decisions.extend(decisions)
 
-        is_heading = applied_any
+        is_heading = governing is not None
+        applied_level = getattr(governing, "level", None) if is_heading else None
         level: int | None = None
         if is_heading:
             if applied_level is not None:

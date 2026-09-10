@@ -136,7 +136,10 @@ def test_bare_number_without_margin_position_is_retained():
 # --- authentication / protocol -------------------------------------------------------
 
 
-def test_a_digitally_signed_stamp_is_removed():
+def test_a_digitally_signed_stamp_is_retained_and_logged_ambiguous():
+    # R3: a "Digitally signed" phrase matches a shape pattern only. No deterministic
+    # artifact-specific signal available at T071 can safely distinguish it from a
+    # quoted author sentence, so it is retained and logged ambiguous — never removed.
     a = _artifacts()
     doc = ced([
         Seg("stamp", "Digitally signed", (300, 700, 452, 712), page=1),
@@ -144,8 +147,9 @@ def test_a_digitally_signed_stamp_is_removed():
     ])
     result = a.remove_artifacts(doc, _reflow(doc))
     kept = {s for u in result.kept_units for s in u.segment_ids}
-    assert "stamp" not in kept
-    assert any(e.entry_type == "auth_stamp" for e in result.removal_log.entries)
+    assert "stamp" in kept
+    entries = [e for e in result.removal_log.entries if e.entry_type == "auth_stamp"]
+    assert entries and all(e.ambiguous for e in entries)
 
 
 def test_an_ambiguous_vertical_phrase_is_retained_not_removed_for_being_vertical():
@@ -214,7 +218,26 @@ def test_table_owned_segments_are_never_considered_removable():
 # --- ambiguity: repeated header text that is also legitimate body content -------------
 
 
-def test_a_truly_repeated_header_with_no_body_collision_is_removed_not_kept():
+def test_a_truly_repeated_header_over_three_pages_with_no_body_collision_is_removed():
+    a = _artifacts()
+    doc = ced([
+        Seg("h1", "ACME CORP — CONFIDENTIAL", (72, 30, 452, 42), page=1),
+        Seg("h2", "ACME CORP — CONFIDENTIAL", (72, 30, 452, 42), page=2),
+        Seg("h3", "ACME CORP — CONFIDENTIAL", (72, 30, 452, 42), page=3),
+        Seg("body1", "Body content of page one.", (72, 100, 452, 130), page=1),
+        Seg("body2", "Body content of page two.", (72, 100, 452, 130), page=2),
+        Seg("body3", "Body content of page three.", (72, 100, 452, 130), page=3),
+    ])
+    result = a.remove_artifacts(doc, _reflow(doc))
+    kept = {s for u in result.kept_units for s in u.segment_ids}
+    assert {"h1", "h2", "h3"}.isdisjoint(kept)
+    entries = [e for e in result.removal_log.entries if e.entry_type == "running_header"]
+    assert entries and all(not e.ambiguous for e in entries)
+
+
+def test_two_page_contiguous_repeated_header_is_kept_as_ambiguous():
+    # R2: exactly two contiguous, position-consistent margin occurrences are not
+    # proof of running furniture — kept and recorded, never removed.
     a = _artifacts()
     doc = ced([
         Seg("h1", "ACME CORP — CONFIDENTIAL", (72, 30, 452, 42), page=1),
@@ -224,9 +247,10 @@ def test_a_truly_repeated_header_with_no_body_collision_is_removed_not_kept():
     ])
     result = a.remove_artifacts(doc, _reflow(doc))
     kept = {s for u in result.kept_units for s in u.segment_ids}
-    assert "h1" not in kept and "h2" not in kept
+    assert {"h1", "h2"} <= kept
     entries = [e for e in result.removal_log.entries if e.entry_type == "running_header"]
-    assert entries and all(not e.ambiguous for e in entries)
+    assert entries and all(e.ambiguous for e in entries)
+    assert any("at least 3" in (e.note or "") for e in entries)
 
 
 # --- determinism -----------------------------------------------------------------

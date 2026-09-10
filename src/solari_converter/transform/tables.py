@@ -240,13 +240,25 @@ class StitchRecord:
 @dataclass(frozen=True)
 class CollapsedHeader:
     """A repeated continuation-header row folded into the retained logical header
-    (FR-022). Its physical segment ids survive here, never in a rendered cell."""
+    (FR-022 — "repeated page-level table headers MUST NOT be emitted as duplicated
+    data rows"; the cross-page single-logical-table guarantee it sits inside is
+    FR-021). Its physical segment ids survive here, never in a rendered cell.
+
+    ``collapsed_into`` is the explicit, deterministic per-logical-cell edge the frozen
+    downstream ``RenderMap.collapsed_segments`` contract needs: each collapsed source
+    segment id maps to **exactly one** canonical retained source segment id — the
+    retained logical-header cell in the same column. Canonical-target rule: when that
+    retained cell has more than one provenance id (only possible when byte-identical
+    duplicate evidence was collapsed into it under R1), the lexicographically smallest
+    id is chosen. One collapsed id never maps to two targets; no target id is invented
+    (every target is a member of ``kept_header_segment_ids``)."""
 
     table_id: str
     page: int
     segment_ids: tuple[str, ...]                     # the physical continuation header
     kept_header_segment_ids: tuple[str, ...]         # the retained logical header row
     per_cell: tuple[tuple[int, tuple[str, ...]], ...]  # (column, collapsed segment ids)
+    collapsed_into: tuple[tuple[str, str], ...] = ()   # (collapsed id, canonical retained id)
     rule: str = "FR-022"
 
 
@@ -777,12 +789,18 @@ class _Builder:
             key = (r0, c0)
             if key in anchors:
                 prev = anchors[key]
-                if _key(prev.text) == _key(s.text):
-                    # Equivalent evidence — the difference is whitespace / case /
-                    # smart-quote only, the same non-materiality bar this module
-                    # already uses for repeated-header collapse (``_row_keys``). The
-                    # retained literal faithfully represents both segments; record
-                    # every contributing id and continue.
+                if prev.text == s.text:
+                    # R1: byte-identical source literals — the *only* same-anchor
+                    # collapse this pass permits. The retained literal reproduces
+                    # every colliding segment's character sequence at the stored
+                    # Unicode/codepoint level exactly, so recording every
+                    # contributing id loses nothing. NO ``comparison_key`` / casefold
+                    # / smart-quote / whitespace / punctuation / numeric-format
+                    # folding: there is no permitted table transform that authorises
+                    # mutating a cell literal, so anything short of codepoint
+                    # identity (``A`` vs ``a``, straight vs smart quote, ``1`` vs
+                    # ``1.00``, differing whitespace or Unicode representation) is a
+                    # material difference and must reject the fragment below.
                     anchors[key] = TableCell(
                         text=prev.text,
                         provenance=prev.provenance + (s.segment_id,),
@@ -791,27 +809,29 @@ class _Builder:
                     )
                     span_amb.append(
                         TableAmbiguity(
-                            "equivalent_cell_evidence_collapsed", scope,
+                            "identical_cell_evidence_collapsed", scope,
                             tuple(sorted(anchors[key].provenance)),
-                            "two segments with equivalent literals resolve to the same "
-                            "grid position; kept one literal, both ids retained",
+                            "two or more segments with byte-identical literals "
+                            "resolve to the same grid position; kept the shared "
+                            "literal, every contributing id retained",
                         )
                     )
                     continue
-                # R1: two DISTINCT source literals at one anchor. Appending the second
-                # id to provenance while its literal has no cell representation is
-                # forbidden — a source segment must never be considered semantically
-                # retained merely because its id appears in provenance. No silent
-                # merge, no speculative concatenation, no invented row/column, no
-                # discarded literal: abandon the whole table fragment conservatively.
+                # R1: two source literals that are NOT codepoint-identical at one
+                # anchor. Appending the second id to provenance while its literal has
+                # no cell representation is forbidden — a source segment must never be
+                # considered semantically retained merely because its id appears in
+                # provenance. No silent merge, no speculative concatenation, no
+                # invented row/column, no discarded literal, no case/quote/whitespace
+                # equivalence: abandon the whole table fragment conservatively.
                 self._ambiguity(
                     "same_anchor_literal_collision", scope,
                     (prev.provenance[0], s.segment_id),
                     f"source segments {prev.provenance[0]!r} and {s.segment_id!r} "
-                    f"carry distinct literals but both resolve to row {r0}, column "
-                    f"{c0}; faithful table representation of both is impossible — "
-                    "table reconstruction abandoned, region left for ordinary "
-                    "semantic processing",
+                    f"carry literals that are not codepoint-identical but both "
+                    f"resolve to row {r0}, column {c0}; faithful table "
+                    "representation of both is impossible — table reconstruction "
+                    "abandoned, region left for ordinary semantic processing",
                 )
                 return None, span_amb
             anchors[key] = TableCell(
@@ -1168,6 +1188,17 @@ class _Builder:
             per_cell = tuple(
                 (c.column, tuple(c.provenance)) for c in candidate if c.provenance
             )
+            # R7: the explicit per-logical-cell collapsed-id -> retained-id edge.
+            # ``same_shape`` guarantees ``candidate`` and ``logical_header`` are
+            # positionally aligned cell-for-cell, so each continuation-header cell's
+            # canonical target is the retained header cell in the same position.
+            collapsed_into: list[tuple[str, str]] = []
+            for cand_cell, kept_cell in zip(candidate, logical_header, strict=True):
+                if not cand_cell.provenance or not kept_cell.provenance:
+                    continue
+                canonical = min(kept_cell.provenance)  # documented canonical rule
+                for sid in cand_cell.provenance:
+                    collapsed_into.append((sid, canonical))
             self.collapsed_headers.append(
                 CollapsedHeader(
                     table_id=table_id,
@@ -1179,6 +1210,7 @@ class _Builder:
                         s for c in logical_header for s in c.provenance
                     ),
                     per_cell=per_cell,
+                    collapsed_into=tuple(collapsed_into),
                 )
             )
             return frag_rows[1:]

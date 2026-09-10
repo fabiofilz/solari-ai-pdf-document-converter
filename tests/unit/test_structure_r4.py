@@ -10,6 +10,8 @@ decision per source block.
 
 from __future__ import annotations
 
+import itertools
+
 from ._semantic_fixtures import Seg, ced
 
 
@@ -107,3 +109,47 @@ def test_agreeing_explicit_levels_are_not_treated_as_a_conflict():
     u = res.units[0]
     assert u.role == "heading" and u.level == 2
     assert sum(1 for d in res.hint_decisions if d.applied) == 1
+
+
+# --- R4 (second pass): explicit level outranks unspecified None hints --------------
+
+
+_ONE_EXPLICIT_PLUS_NONE = [
+    ("heading", None, "docling"),
+    ("heading", 3, "pdfplumber"),
+    ("heading", None, "tesseract"),
+]
+
+
+def test_single_explicit_level_governs_over_any_number_of_none_hints():
+    res = _run([_seg("h", "Definitions", 100, height=16,
+                     hints=list(_ONE_EXPLICIT_PLUS_NONE))])
+    u = res.units[0]
+    assert u.role == "heading" and u.level == 3  # the explicit 3, not depth/1
+    applied = [d for d in res.hint_decisions if d.applied]
+    assert len(applied) == 1 and applied[0].hint_ref.endswith(":3")
+    # the None hints are recorded, corroborating the role only
+    none_decs = [d for d in res.hint_decisions if d.hint_ref.endswith(":None")]
+    assert none_decs and all(not d.applied for d in none_decs)
+
+
+def test_explicit_vs_none_resolution_is_independent_of_hint_permutation():
+    outcomes = set()
+    decision_keys = set()
+    for perm in itertools.permutations(_ONE_EXPLICIT_PLUS_NONE):
+        res = _run([_seg("h", "Definitions", 100, height=16, hints=list(perm))])
+        u = res.units[0]
+        outcomes.add((u.role, u.level))
+        decision_keys.add(
+            tuple((d.hint_ref, d.applied, d.reason) for d in res.hint_decisions)
+        )
+    assert outcomes == {("heading", 3)}
+    assert len(decision_keys) == 1  # byte-identical decision sequence every permutation
+
+
+def test_no_explicit_level_still_uses_numbering_depth_not_a_hint():
+    res = _run([_seg("h", "1.2 Governance Model", 100, height=15, hints=[
+        ("heading", None, "docling"), ("heading", None, "pdfplumber"),
+    ])])
+    u = res.units[0]
+    assert u.role == "heading" and u.level == 2  # from "1.2", not from a hint

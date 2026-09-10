@@ -121,3 +121,57 @@ def test_no_collapsed_headers_leaves_the_tuple_empty():
     ])
     sem = build_semantic.build_semantic(doc)
     assert sem.collapsed_headers == ()
+
+
+# --- R7 (second pass): explicit singular collapsed-id -> target-id edge -------------
+
+
+def test_collapsed_into_maps_each_collapsed_id_to_exactly_one_retained_target():
+    doc = _stitched_doc()
+    tr = tables.build_tables(doc)
+    ch = tr.collapsed_headers[0]
+
+    # every collapsed source id has exactly one edge; every target is a retained
+    # logical-header id; the pairing is per logical column.
+    edges = dict(ch.collapsed_into)
+    assert len(ch.collapsed_into) == len(edges)                 # no id maps twice
+    assert set(edges) == set(ch.segment_ids)                     # every collapsed id covered
+    assert set(edges.values()) <= set(ch.kept_header_segment_ids)  # no invented target
+    assert edges == {"p2r0c0": "p1r0c0", "p2r0c1": "p1r0c1"}
+
+
+def test_collapsed_into_canonical_target_is_deterministic_under_duplicate_evidence():
+    # two byte-identical retained header cells collapse into one logical header cell
+    # (R1 identical-evidence path); the canonical target is the lexicographically
+    # smallest retained id, and one collapsed id still maps to exactly one target.
+    def grid(rows, page, top0, *, dup_c0=False):
+        segs = []
+        for r, row in enumerate(rows):
+            for c, v in enumerate(row):
+                segs.append(_tcell(f"p{page}r{r}c{c}", v, 72 + 90 * c, top0 + 14 * r,
+                                   page=page))
+        if dup_c0:
+            # a second byte-identical header cell at the same anchor as p{page}r0c0
+            segs.append(_tcell(f"p{page}r0c0dup", rows[0][0], 72, top0, page=page))
+        return segs
+
+    doc = ced(
+        grid([["Date", "Amount"], ["2026-01-01", "100.00"]], 1, 60, dup_c0=True)
+        + grid([["Date", "Amount"], ["2026-02-01", "200.00"]], 2, 60)
+    )
+    tr = tables.build_tables(doc)
+    assert tr.collapsed_headers
+    ch = tr.collapsed_headers[0]
+    edges = ch.collapsed_into
+    assert len(edges) == len({c for c, _t in edges})
+    for _c, target in edges:
+        assert target in ch.kept_header_segment_ids
+    # column-0 target is min({"p1r0c0", "p1r0c0dup"}) == "p1r0c0"
+    assert ("p2r0c0", "p1r0c0") in edges
+
+
+def test_semantic_document_preserves_the_collapsed_into_edge():
+    doc = _stitched_doc()
+    sem = build_semantic.build_semantic(doc)
+    ch = sem.collapsed_headers[0]
+    assert ch.collapsed_into == (("p2r0c0", "p1r0c0"), ("p2r0c1", "p1r0c1"))

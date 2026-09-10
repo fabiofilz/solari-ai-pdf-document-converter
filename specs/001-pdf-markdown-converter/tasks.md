@@ -232,6 +232,58 @@ none removed, every T075–T161 stays `[ ]`:
   vanished with no permitted transform. Tests:
   `tests/unit/test_semantic_r8_literal_accounting.py`.
 
+**2026-09-09 second post-semantic remediation** (independent re-audit of checkpoint
+`73fb7d9`; remaining reproduced findings only — narrow pass, **no T075+ work**, no task
+renumbered/removed, every T075–T161 stays `[ ]`):
+- **R1 (BLOCKER)** `transform/tables.py` `_Builder._assign_cells` — same-anchor collapse
+  now requires **codepoint-identical** source literals. `comparison_key` / casefold /
+  smart-quote / whitespace / punctuation / numeric-format equivalence no longer
+  authorises collapse (no permitted table transform mutates a cell literal); anything
+  short of byte identity rejects the fragment conservatively (nothing consumed). New
+  ambiguity kind `identical_cell_evidence_collapsed`.
+- **R8-A** `transform/build_semantic.py` — `accepted_partition_violations` +
+  `AcceptedPartitionError`, enforced at runtime in `build_semantic`: every accepted id
+  is in exactly one terminal state (retained / collapsed / removed); the three sets are
+  pairwise disjoint and union to the accepted-id set.
+- **R8-B/C/D** `literal_accounting_violations` rewritten to a **verbatim** substring
+  check (no comparison normalisation to prove delivered fidelity). A `dehyphenate`
+  record exempts only the exact trailing-`U+002D` boundary drop (`left.text[:-1] +
+  right.text` must appear verbatim); an arbitrary replacement under a real or fake
+  dehyphenate record still fails. Collapsed / removed segments are out of scope only
+  via their explicit lineage records.
+- **R2 (HIGH)** `transform/artifacts.py` — generic repetition-based header/footer
+  **removal** now needs ≥ `GENERIC_FURNITURE_MIN_OCCURRENCES` (3) qualifying
+  occurrences. Exactly 2 contiguous, position-consistent margin occurrences are
+  ambiguous → kept + recorded (never removed). Absolute count, no document-size ratio.
+- **R3 (HIGH)** `transform/artifacts.py` `_detect_auth_protocol` — a textual
+  auth / hash / barcode pattern is **never** auto-removed at T071. `_margin_band`
+  (accepted-content extrema) is not physical margin evidence and no independent
+  artifact-specific signal is available, so such text is always retained + logged
+  ambiguous. `_margin_band` stays corroboration for explicit page-number evidence only.
+- **R4 (MEDIUM)** `transform/structure.py` `infer_structure` — exactly one explicit
+  heading level (+ any number of `level=None` hints) → that explicit level is the
+  semantic level; `None` hints corroborate the role only and never consume the
+  decision. One governing hint per source block; extractor lexical order never chooses
+  the level; unresolved multi-explicit conflict → body.
+- **R5 (MEDIUM)** `transform/lists.py` — the capitalisation-of-following-prose
+  heuristic is removed. A bare dotted-number / Roman clause prefix classifies as a
+  clause **only** with independent deterministic structural evidence (a carried
+  `list_item` hint on the unit); otherwise ordinary body, literal preserved exactly.
+  Explicit legal keywords (`Article` / `Cláusula` / …) are unchanged.
+- **R7** `transform/tables.py` `CollapsedHeader` gains an additive `collapsed_into`
+  edge — each collapsed source id → exactly one canonical retained id (the same-column
+  retained header cell; canonical target = lexicographically smallest retained
+  provenance id when byte-identical duplicate evidence collapsed into it). Ephemeral
+  T070/T073 lineage only; no committed schema change. `RenderMap.collapsed_segments`
+  is FR-022 (repeated headers not duplicated); FR-021 is the cross-page single-table
+  guarantee it sits inside — code/comment terminology aligned.
+- **R6** unchanged (independently verified green).
+- Tests: `tests/unit/test_tables_r1_collision.py`, `test_semantic_r8_literal_accounting.py`,
+  `test_artifacts_r2_r3.py`, `test_structure_r4.py`, `test_lists_r5.py`,
+  `test_tables_r6_r7.py`, and `test_semantic_combined_remediation.py` (combined
+  interaction). Full suite: 764 passed / 21 failed (identical pre-existing future-owner
+  RED set) / 10 deselected; 0 unexpected. Ruff clean on every changed file.
+
 - [x] T066 [P] [US1] Write failing unit tests, one file each (M3): `tests/unit/test_reflow.py` (visual wraps joined; **de-hyphenation per research §27 (authoritative, pinned 2026-09-09)** — trailing U+002D kept by default; removed **only** when the un-hyphenated joined token occurs elsewhere in the same CED as a complete token **and** the §27 structural guards hold; compound / legal hyphen (`IGP-M`) kept; ambiguous ⇒ hyphen kept; every removal emits a `dehyphenate` `SegmentTransform` naming the attesting occurrence; no dictionary / LLM), `tests/unit/test_structure.py` (heading-level inference; no-headings doc stays flat; **structural-hint audit** — a used vs rejected Docling heading hint is recorded either way), `tests/unit/test_lists.py` (bulleted/numbered list + nesting reconstruction; numbered article/clause identifiers retained; a false list-hint is not applied without other evidence), `tests/unit/test_tables.py` (mid-page start; >2 pages; exact rows/cols/numerics; repeated header once; no reordering; merged cells → `has_merged_cells`), `tests/unit/test_artifacts.py` (repeated running header/footer + page number removed and logged; a header string that is also body content is kept + recorded; meaningful vertical text preserved) — **DONE 2026-09-09 (Semantic Block S1)**: 5 test files + `tests/unit/_semantic_fixtures.py` (a direct CED builder — Stage 3 consumes the CED only). `test_reflow.py` / `test_structure.py` / `test_lists.py` are **GREEN** (owners T067/T068/T069); `test_tables.py` / `test_artifacts.py` stay **intentionally RED** (owners **T070** / **T071+T072** — S1 did not implement tables or artifact removal). RED-before-GREEN evidence recorded per family.
 - [x] T067 [P] [US1] Create `src/solari_converter/transform/reflow.py` — de-wrap + de-hyphenate; operates on the CED in `accepted_reading_order` (FR-013/FR-014). **De-hyphenation MUST implement research §27 verbatim (authoritative):** default keep the trailing U+002D; remove + join only on the positive document-internal evidence (joined token attested elsewhere in the same CED as a complete token) with all §27 structural guards; U+002D only (never en/em/figure dash or soft hyphen); OCR-below-threshold fragments stay conservative; ambiguous ⇒ keep; record a `dehyphenate` `SegmentTransform` (`stage:3`, `permitted_by:FR-014`) per removal, naming the joined-with segment and the attesting token occurrence. No external dictionary, no LLM, no network. Do **not** pin paragraph-gap / heading / list / table constants here — those belong to T068–T072. (depends on T022; tests T066 `test_reflow.py`) — **DONE 2026-09-09 (S1)**: `reflow(ced) -> ReflowResult` (paragraph units + ordered `SegmentTransform` records). §27 verbatim: default keep U+002D; remove only on the in-CED complete-token attestation with every structural guard; U+002D only; OCR `< DEHYPHENATION_MIN_OCR_CONFIDENCE` stays conservative; every wrapped join records exactly one `dehyphenate` **or** `reflow_whitespace`. Named module constants only (`PARAGRAPH_BREAK_GAP_RATIO`, `INDENT_TOLERANCE`, `MIN_LETTERS_BEFORE_HYPHEN`, …) — no Config, no run-identity fold. `SegmentTransform` / `HintDecision` internal records live here (shaped to map onto T141 / T073 without a rewrite).
 - [x] T068 [P] [US1] Create `src/solari_converter/transform/structure.py` — heading/hierarchy inference; **MAY consult `carried_structural_hints`**, MUST record each as `applied: true|false` (FR-064, SC-026); no fabricated hierarchy; deep levels flagged for `[L{n}]` (depends on T022; tests T066 `test_structure.py`) — **DONE 2026-09-09 (S1)**: `infer_structure(ced, reflow_result) -> StructureResult`. A carried heading hint is applied only with ≥1 corroborating deterministic signal (short ∧ not prose-terminated ∧ (single-line ∨ section-numbering ∨ title-case/uppercase)); every carried heading/subheading hint recorded `applied`/not with a reason; contradictory hints for one unit are both recorded, at most one applied. Level = hint level, else numbering depth, else 1; `level > 6` → `deep=True` (no `#` / `[L{n}]` text emitted — Stage 5's job). No heading is fabricated without a hint.

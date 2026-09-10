@@ -1,27 +1,38 @@
-"""R8 (post-semantic remediation audit of ``70aa0cf``) — the literal-level semantic
-accounting invariant.
+"""R8 — the exact literal-level + accepted-ID partition semantic accounting invariants.
 
 The set-level invariant ``retained ⊎ collapsed ⊎ removed == accepted`` is necessary but
 (R1 proved) insufficient: a segment can be *set-accounted* while its literal silently
-vanishes. ``literal_accounting_violations`` closes that: a nominally-retained segment
-whose literal has no rendered representation and no permitted transform to explain the
-delta is a violation.
+vanishes or is quietly mutated.
 
-Documented invariant — for every accepted segment ``s`` that appears in some block's
-``provenance`` and is in neither ``collapsed_segment_ids`` nor ``removed_segment_ids``:
-``norm(s.text)`` is a substring of ``norm(carrier.text)`` for some carrier unit
-(paragraph / heading / clause / list item / table cell) naming ``s``, **or** ``s``
-participates in a recorded ``dehyphenate`` ``SegmentTransform``. ``norm`` = the frozen
-``comparison_key`` (NFC → smart-quote fold → whitespace-collapse) casefolded.
+Second-pass contract (checkpoint ``73fb7d9``):
+
+* ``accepted_partition_violations`` — every accepted id in exactly one terminal state
+  (retained / collapsed / removed); the three sets pairwise disjoint; union == accepted.
+* ``literal_accounting_violations`` — for every nominally-retained ``s`` (id in some
+  block ``provenance``; not collapsed; not removed), ``s.text`` MUST appear **verbatim**
+  (codepoint-exact — NO ``comparison_key`` / casefold / smart-quote / whitespace /
+  punctuation / numeric-format folding) as a substring of some carrier unit naming
+  ``s``. The one exception is the *left* side of a recorded ``dehyphenate`` transform:
+  the single permitted mutation is the trailing-``U+002D`` drop, i.e.
+  ``s.text[:-1] + right.text`` must appear verbatim. Appearing in a ``dehyphenate``
+  record exempts nothing else.
+
+Both are enforced at runtime by ``build_semantic`` (``AcceptedPartitionError`` /
+``LiteralAccountingError``).
 """
 
 from __future__ import annotations
 
+import pytest
+
 import solari_converter.transform.build_semantic as build_semantic
+from solari_converter.model.semantic import ParagraphBlock, SemanticDocument
+from solari_converter.transform.reflow import SegmentTransform
 
 from ._semantic_fixtures import Seg, ced
 
 _violations = build_semantic.literal_accounting_violations
+_partition = build_semantic.accepted_partition_violations
 
 
 def _tcell(sid, text, x0, top, *, page=1, w=80.0):
@@ -67,9 +78,167 @@ def test_holds_when_a_hyphen_is_repaired_by_a_dehyphenate_transform():
     assert _violations(sem, doc) == []
 
 
-def test_case_and_whitespace_only_differences_are_not_violations():
+def test_a_segments_own_literal_is_delivered_verbatim_including_internal_spacing():
     doc = ced([Seg("s", "TOTAL   DUE", (72, 100, 200, 112))])
     sem = build_semantic.build_semantic(doc)
-    # the paragraph text is the segment's own literal — trivially holds; the point is
-    # norm() folds the double space / case so an equivalent literal never trips it.
+    para = next(b for b in sem.blocks if b.kind == "paragraph")
+    assert para.text == "TOTAL   DUE"  # double space preserved, not collapsed
     assert _violations(sem, doc) == []
+
+
+# --- R8 (second pass) adversarial: comparison-equivalence is NOT fidelity ------------
+
+
+def _para(sid, text, *, prov=None):
+    return ParagraphBlock(
+        kind="paragraph", block_id=f"blk-{sid}", text=text,
+        provenance=tuple(prov or (sid,)),
+    )
+
+
+def _doc_one(sid, literal):
+    return ced([Seg(sid, literal, (72, 100, 300, 112))])
+
+
+@pytest.mark.parametrize(
+    ("literal", "delivered"),
+    [
+        ("Total Due", "total due"),          # case mutation
+        ('He said "yes"', "He said “yes”"),  # smart/straight quote mutation
+        ("Section 3.", "Section 3:"),          # punctuation mutation
+        ("1,234.50", "1234.5"),                # numeric-format mutation (in place)
+        ("abcdef", "TOTAL REPLACEMENT"),       # arbitrary replacement
+    ],
+)
+def test_non_verbatim_delivery_of_a_retained_literal_is_a_violation(literal, delivered):
+    doc = _doc_one("s", literal)
+    sem = SemanticDocument(blocks=(_para("s", delivered),))
+    assert _violations(sem, doc) == ["s"]
+
+
+def test_arbitrary_replacement_under_a_fake_dehyphenate_record_still_fails():
+    doc = ced([
+        Seg("l", "abcdef", (72, 100, 110, 112)),
+        Seg("r", "ghi", (72, 113, 140, 125)),
+    ])
+    # "l" carries a trailing hyphen? no — and the delivered text is a total
+    # replacement. A dehyphenate lineage record must not exempt it.
+    sem = SemanticDocument(
+        blocks=(_para("p", "TOTAL REPLACEMENT", prov=("l", "r")),),
+        segment_transforms=(
+            SegmentTransform(
+                kind="dehyphenate", permitted_by="FR-014",
+                segment_ids=("l", "r"), joined_with="r",
+                boundary="fabricated",
+            ),
+        ),
+    )
+    assert "l" in _violations(sem, doc)
+
+
+def test_arbitrary_replacement_under_a_real_looking_dehyphenate_record_fails():
+    # "l" genuinely ends with a hyphen, but the delivered carrier is not
+    # l.text[:-1] + r.text — the exact boundary mutation is not what happened.
+    doc = ced([
+        Seg("l", "inter-", (72, 100, 110, 112)),
+        Seg("r", "national", (72, 113, 160, 125)),
+    ])
+    sem = SemanticDocument(
+        blocks=(_para("p", "something else entirely", prov=("l", "r")),),
+        segment_transforms=(
+            SegmentTransform(
+                kind="dehyphenate", permitted_by="FR-014",
+                segment_ids=("l", "r"), joined_with="r", boundary="x",
+            ),
+        ),
+    )
+    assert "l" in _violations(sem, doc)
+
+
+def test_exact_boundary_dehyphenation_is_accepted():
+    doc = ced([
+        Seg("l", "inter-", (72, 100, 110, 112)),
+        Seg("r", "national trade", (72, 113, 200, 125)),
+    ])
+    sem = SemanticDocument(
+        blocks=(_para("p", "international trade", prov=("l", "r")),),
+        segment_transforms=(
+            SegmentTransform(
+                kind="dehyphenate", permitted_by="FR-014",
+                segment_ids=("l", "r"), joined_with="r", boundary="x",
+            ),
+        ),
+    )
+    assert _violations(sem, doc) == []
+
+
+def test_correct_reflow_whitespace_join_is_accepted():
+    doc = ced([
+        Seg("a", "first part", (72, 100, 160, 112)),
+        Seg("b", "second part", (72, 113, 200, 125)),
+    ])
+    sem = SemanticDocument(blocks=(_para("p", "first part second part", prov=("a", "b")),))
+    assert _violations(sem, doc) == []
+
+
+def test_accepted_id_absent_from_every_terminal_set_is_a_partition_violation():
+    doc = ced([
+        Seg("kept", "delivered text", (72, 100, 200, 112)),
+        Seg("lost", "never placed anywhere", (72, 120, 200, 132)),
+    ])
+    sem = SemanticDocument(blocks=(_para("kept", "delivered text"),))
+    v = _partition(sem, doc)
+    assert v.get("absent") == ["lost"]
+
+
+def test_id_in_provenance_but_literal_missing_is_a_literal_violation_not_partition():
+    doc = ced([
+        Seg("kept", "REAL VALUE", (72, 100, 200, 112)),
+        Seg("ghost", "LOST VALUE", (72, 120, 200, 132)),
+    ])
+    sem = SemanticDocument(blocks=(_para("p", "REAL VALUE", prov=("kept", "ghost")),))
+    assert _partition(sem, doc) == {}          # ghost IS in a provenance → retained
+    assert _violations(sem, doc) == ["ghost"]  # …but its literal never arrived
+
+
+def test_valid_collapsed_header_segment_is_exempt_from_literal_check():
+    from solari_converter.model.semantic import TableBlock
+    from solari_converter.transform.tables import CollapsedHeader, LogicalTable, TableCell
+
+    doc = ced([
+        Seg("h", "Date", (72, 60, 120, 72)),
+        Seg("c", "Date", (72, 200, 120, 212)),  # repeated continuation header
+    ])
+    cell = TableCell(text="Date", provenance=("h",), row=0, column=0, is_header=True)
+    table = LogicalTable(
+        table_id="tbl-x", rows=[[cell]], has_merged_cells=False,
+        header_row_count=1, spans_pages=[1, 2],
+    )
+    block = TableBlock(
+        kind="table", block_id="blk-x", table=table,
+        provenance=("h", "c"), hint_decisions=(),
+    )
+    ch = CollapsedHeader(
+        table_id="tbl-x", page=2, segment_ids=("c",),
+        kept_header_segment_ids=("h",), per_cell=((0, ("c",)),),
+        collapsed_into=(("c", "h"),),
+    )
+    sem = SemanticDocument(
+        blocks=(block,), collapsed_segment_ids=frozenset({"c"}),
+        collapsed_headers=(ch,),
+    )
+    assert _violations(sem, doc) == []
+    assert _partition(sem, doc) == {}
+
+
+def test_valid_artifact_removed_segment_is_exempt_from_literal_check():
+    doc = ced([
+        Seg("body", "Ordinary paragraph text.", (72, 100, 300, 112)),
+        Seg("furn", "ACME CONFIDENTIAL", (72, 30, 300, 42)),
+    ])
+    sem = SemanticDocument(
+        blocks=(_para("body", "Ordinary paragraph text."),),
+        removed_segment_ids=frozenset({"furn"}),
+    )
+    assert _violations(sem, doc) == []
+    assert _partition(sem, doc) == {}

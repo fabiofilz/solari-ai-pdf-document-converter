@@ -86,10 +86,14 @@ def test_ambiguous_nesting_prefers_the_flatter_representation():
 
 
 def test_numbered_article_and_clause_identifiers_are_retained_verbatim():
+    # "Article"/"Cláusula" are explicit legal keywords — unambiguous clause evidence.
+    # A *bare* Roman "IV." needs independent deterministic structural evidence (R5):
+    # here a carried list_item hint marks it as an enumerated item.
     res = _run([
         _seg("c1", "Article 1 — Scope. This Agreement governs the engagement.", 100),
         _seg("c2", "Cláusula 4ª. O objeto do presente contrato é a prestação.", 130),
-        _seg("c3", "IV. Governing law and jurisdiction.", 160),
+        _seg("c3", "IV. Governing law and jurisdiction.", 160,
+             hints=[("list_item", None, "docling")]),
     ])
     clauses = [u for u in res.units if getattr(u, "role", None) == "clause"]
     ids = [c.identifier for c in clauses]
@@ -122,7 +126,10 @@ def test_a_list_hint_with_a_real_marker_is_applied_and_recorded():
 
 
 def test_clause_identifier_is_never_renumbered_or_reformatted():
-    res = _run([_seg("c", "1.2.3 Sub-obligation of the supplier.", 100)])
+    # bare dotted number → needs structural evidence (R5); once classified, the
+    # identifier is retained verbatim.
+    res = _run([_seg("c", "1.2.3 Sub-obligation of the supplier.", 100,
+                     hints=[("list_item", None, "docling")])])
     clause = next(u for u in res.units if getattr(u, "role", None) == "clause")
     assert clause.identifier == "1.2.3"  # exact, dots kept, not "1-2-3" or "123"
 

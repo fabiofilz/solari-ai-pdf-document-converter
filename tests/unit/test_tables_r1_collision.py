@@ -90,24 +90,62 @@ def test_collision_fallback_is_deterministic_under_permutation():
     assert r1.consumed_segment_ids == r2.consumed_segment_ids == frozenset()
 
 
-# --- equivalent (non-material) evidence may still collapse ----------------------------
+# --- ONLY codepoint-identical literals may collapse ---------------------------------
 
 
-def test_equivalent_literals_at_one_anchor_collapse_without_literal_loss():
-    # case-only difference is non-material (the module's own header-collapse bar) —
-    # the retained literal faithfully represents both, so the table is still built.
-    collide = _tcell("a2", "a", 72, 120)  # "a" vs "A" — casefold-equal
+def test_byte_identical_literals_at_one_anchor_collapse_without_literal_loss():
+    collide = _tcell("a2", "A", 72, 120)  # exactly "A" — same as segment "a"
     doc = ced(_two_by_two(extra=collide))
     result = tables.build_tables(doc)
 
     tbl = next(b for b in result.blocks if b.kind == "table")
     cell = tbl.table.rows[1][0]
-    assert cell.text in {"A", "a"}
+    assert cell.text == "A"
     assert {"a", "a2"} <= set(cell.provenance)
     assert {"a", "a2"} <= set(result.consumed_segment_ids)
     assert any(
-        amb.kind == "equivalent_cell_evidence_collapsed" for amb in result.ambiguities
+        amb.kind == "identical_cell_evidence_collapsed" for amb in result.ambiguities
     )
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("A", "a"),                 # case
+        ('"hi"', "“hi”"),  # straight vs smart quotes
+        ("total", "total "),        # trailing whitespace
+        ("total due", "total  due"),  # internal whitespace
+        ("1", "1.00"),              # numeric formatting
+        ("nao", "não"),        # different Unicode representation
+        ("A,", "A;"),               # punctuation
+    ],
+)
+def test_non_identical_literals_at_one_anchor_reject_the_fragment(first, second):
+    segs = [
+        _tcell("h0", "H1", 72, 100), _tcell("h1", "H2", 162, 100),
+        _tcell("a", first, 72, 120), _tcell("b", "B", 162, 120),
+        _tcell("a2", second, 72, 120),
+    ]
+    result = tables.build_tables(ced(segs))
+    assert not any(b.kind == "table" for b in result.blocks)
+    assert any(
+        amb.kind == "same_anchor_literal_collision" for amb in result.ambiguities
+    )
+    assert result.consumed_segment_ids == frozenset()  # no distinct literal disappears
+
+
+def test_three_or_more_identical_collisions_stay_safe():
+    segs = [
+        _tcell("h0", "H1", 72, 100), _tcell("h1", "H2", 162, 100),
+        _tcell("a", "A", 72, 120), _tcell("b", "B", 162, 120),
+        _tcell("a2", "A", 72, 120), _tcell("a3", "A", 72, 120),
+    ]
+    result = tables.build_tables(ced(segs))
+    tbl = next(b for b in result.blocks if b.kind == "table")
+    cell = tbl.table.rows[1][0]
+    assert cell.text == "A"
+    assert {"a", "a2", "a3"} <= set(cell.provenance)
+    assert {"a", "a2", "a3"} <= set(result.consumed_segment_ids)
 
 
 # --- 4. wrapped-cell + merged-span behaviour is untouched ----------------------------

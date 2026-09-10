@@ -126,8 +126,13 @@ class SemanticDocument:
     #: carried forward **verbatim** (same "reuse, don't re-model" rule as
     #: :class:`TableBlock`). ``collapsed_segment_ids`` above stays the flat set the
     #: set-level accounting invariant uses; this keeps the per-collapse
-    #: continuation-header → retained-header mapping (``per_cell`` column pairing +
-    #: ``kept_header_segment_ids``) that the downstream ``RenderMap.collapsed_segments``
-    #: ``collapsed_into`` edge (data-model.md, research §25.2/§25.7, FR-021) needs —
-    #: information the flat set discards. Additive; no schema (this model is ephemeral).
+    #: continuation-header → retained-header mapping — the explicit
+    #: ``CollapsedHeader.collapsed_into`` edge (one collapsed source id → exactly one
+    #: canonical retained source id), plus the ``per_cell`` column pairing and
+    #: ``kept_header_segment_ids`` context — that the downstream
+    #: ``RenderMap.collapsed_segments`` ``collapsed_into`` edge (data-model.md,
+    #: research §25.2/§25.7) needs. The permitting requirement is **FR-022** (repeated
+    #: page-level table headers must not be emitted as duplicated data rows); FR-021
+    #: is the cross-page single-logical-table guarantee the collapsed header sits
+    #: inside. Additive; no schema (this model is ephemeral).
     collapsed_headers: tuple[CollapsedHeader, ...] = ()

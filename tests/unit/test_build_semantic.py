@@ -82,11 +82,13 @@ def _full_fixture():
         Seg("li1", "- First point.", (72, 168, 452, 182), page=1),
         Seg("li2", "- Second point.", (72, 186, 452, 200), page=1),
         Seg("f1", "Page 1", (250, 760, 340, 772), page=1),  # footer (removed)
-        # a second page's identical running header — repetition is required for T071
-        # to classify "h1" as a genuinely removable running header (single occurrence
-        # can never prove "running").
+        # further pages' identical running header — R2 requires at least 3 qualifying
+        # occurrences before generic repetition-based furniture removal is authorised
+        # (2 contiguous occurrences are ambiguous, kept).
         Seg("h2", "ACME CORP — CONFIDENTIAL", (72, 30, 452, 42), page=2),
         Seg("body2", "Continuation body content on page two.", (72, 100, 452, 130), page=2),
+        Seg("h3", "ACME CORP — CONFIDENTIAL", (72, 30, 452, 42), page=3),
+        Seg("body3", "Continuation body content on page three.", (72, 100, 452, 130), page=3),
     ])
 
 
