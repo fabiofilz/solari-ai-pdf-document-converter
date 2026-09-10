@@ -596,6 +596,9 @@ def authenticated_dehyphenations(
     * the left participant's stored CED literal ends in ``U+002D``;
     * no other ``dehyphenate`` record shares this record's ``joined_with`` or its
       ``(left, right)`` boundary (no conflicting duplicate transforms).
+    * reconstructing the unique carrier from its exact CED literals and applying the
+      authenticated transforms at their exact adjacent boundaries yields the carrier's
+      actual text codepoint-for-codepoint (a joined token elsewhere proves nothing).
 
     Deterministic; order-preserving. A forged record (``permitted_by="FR-999"``,
     ``stage=99``, unknown / unrelated / reordered ids, a cross-carrier or duplicated
@@ -604,9 +607,9 @@ def authenticated_dehyphenations(
     """
     ced_text = _ced_literals(ced)
     carriers = [
-        tuple(prov)
+        (b.kind == "table", tuple(prov), text)
         for b in semantic.blocks
-        for _text, prov in _carrier_units(b)
+        for text, prov in _carrier_units(b)
         if prov
     ]
     deh = [t for t in semantic.segment_transforms if t.kind == "dehyphenate"]
@@ -621,7 +624,7 @@ def authenticated_dehyphenations(
             key = (sids[-2], sids[-1])
             boundary_counts[key] = boundary_counts.get(key, 0) + 1
 
-    out: list[SegmentTransform] = []
+    structurally_valid: list[tuple[SegmentTransform, tuple[bool, tuple[str, ...], str]]] = []
     for t in deh:
         sids = tuple(t.segment_ids or ())
         # frozen conflict rule (no duplicate transform for the same joined boundary)
@@ -631,18 +634,39 @@ def authenticated_dehyphenations(
             continue
         # exactly one hosting carrier, each validated by the frozen per-carrier contract
         hosts = [
-            prov
-            for prov in carriers
+            carrier
+            for carrier in carriers
+            for _is_table, prov, _actual in (carrier,)
             if _dehyphenate_participants(t, prov, ced_text) is not None
         ]
         if len(hosts) != 1:
             continue
         host = hosts[0]
-        v = _dehyphenate_participants(t, host, ced_text)
+        _is_table, host_prov, _actual = host
+        v = _dehyphenate_participants(t, host_prov, ced_text)
         if v is None:
             continue
         left_id, right_id = v
-        if left_id != host[host.index(right_id) - 1]:
+        if left_id != host_prov[host_prov.index(right_id) - 1]:
+            continue
+        structurally_valid.append((t, host))
+
+    # Bind lineage to the actual carrier, not to a joined token found somewhere in it.
+    # Reconstruct each hosting carrier from its exact CED literals using precisely the
+    # structurally-valid, non-conflicting transforms at their authenticated boundaries.
+    # A wrong/ambiguous occurrence therefore invalidates the claimed transform even if
+    # the same joined token happens to occur elsewhere in the carrier.
+    tx_by_right: dict[str, list[SegmentTransform]] = {}
+    for t, _host in structurally_valid:
+        if t.joined_with is not None:
+            tx_by_right.setdefault(t.joined_with, []).append(t)
+    authentic_ident = _authenticated_ident_groups(semantic, ced)
+
+    out: list[SegmentTransform] = []
+    for t, (is_table, prov, actual) in structurally_valid:
+        if _carrier_violations(
+            actual, prov, is_table, ced_text, tx_by_right, authentic_ident
+        ):
             continue
         out.append(t)
     return tuple(out)

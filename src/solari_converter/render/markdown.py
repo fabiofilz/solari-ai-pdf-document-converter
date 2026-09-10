@@ -58,6 +58,8 @@ __all__ = [
     "LIST_INDENT",
     "render_markdown",
     "render_markdown_bytes",
+    "serialize_html_cell_text",
+    "serialize_pipe_cell",
 ]
 
 #: The deterministic block-level OCR-derived marker (FR-025). Placed on its own line
@@ -202,7 +204,7 @@ def _render_pipe_table(rows: list[list[TableCell]]) -> str:
     ncols = max((len(r) for r in rows), default=0)
     lines: list[str] = []
     for i, row in enumerate(rows):
-        cells = [_pipe_cell(c.text) for c in row]
+        cells = [serialize_pipe_cell(c.text) for c in row]
         cells += [""] * (ncols - len(cells))
         lines.append("| " + " | ".join(cells) + " |")
         if i == 0:
@@ -218,7 +220,7 @@ def _render_html_table(rows: list[list[TableCell]]) -> str:
     return "\n".join(lines)
 
 
-def _pipe_cell(text: str) -> str:
+def serialize_pipe_cell(text: str) -> str:
     """A pipe-table cell value (research §25.2 ``markdown_escape``): backslash first,
     then the HTML-significant characters as entities (``&`` before ``<``/``>`` so a
     literal ``&lt;`` is not double-encoded — authored ``<b>x</b> & y`` must never become
@@ -242,6 +244,10 @@ def _pipe_cell(text: str) -> str:
     )
 
 
+# Kept for the frozen T075 renderer tests and existing internal callers.
+_pipe_cell = serialize_pipe_cell
+
+
 def _html_cell(cell: TableCell) -> str:
     tag = "th" if cell.is_header else "td"
     attrs = ""
@@ -249,10 +255,10 @@ def _html_cell(cell: TableCell) -> str:
         attrs += f' rowspan="{cell.rowspan}"'
     if cell.colspan > 1:
         attrs += f' colspan="{cell.colspan}"'
-    return f"<{tag}{attrs}>{_html_escape(cell.text)}</{tag}>"
+    return f"<{tag}{attrs}>{serialize_html_cell_text(cell.text)}</{tag}>"
 
 
-def _html_escape(text: str) -> str:
+def serialize_html_cell_text(text: str) -> str:
     """An HTML ``<table>`` cell value (research §25.2 ``html_escape`` / ``cell_newline_br``):
     ``&`` before ``<``/``>``, then a hard line break to ``<br>``. Markdown emphasis is
     inert inside an HTML block, so no backslash escaping is needed or wanted here."""
@@ -264,6 +270,10 @@ def _html_escape(text: str) -> str:
         .replace("\r", "\n")
         .replace("\n", "<br>")
     )
+
+
+# Backwards-compatible internal name; the public pure helper is shared with validation.
+_html_escape = serialize_html_cell_text
 
 
 # --- OCR marking ----------------------------------------------------------------

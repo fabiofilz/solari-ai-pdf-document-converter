@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from solari_converter.model.semantic import (
     ParagraphBlock,
     SemanticDocument,
@@ -173,6 +175,80 @@ def test_r1_pipe_cell_html_render_cannot_activate_authored_markup():
     assert "<script>" not in md
     assert "<b>" not in md
     assert "&lt;script&gt;alert(1)&lt;/script&gt; &amp; &lt;b&gt;bold&lt;/b&gt;" in md
+
+
+@pytest.mark.parametrize(
+    ("authored", "escaped", "active"),
+    [
+        ("&copy;", "&amp;copy;", "&copy;"),
+        ("<b>x</b>", "&lt;b&gt;x&lt;/b&gt;", "<b>x</b>"),
+        ("A & B < C > D", "A &amp; B &lt; C &gt; D", "A & B < C > D"),
+        (
+            "&copy; | \\ ` * _ <b>x</b>\r\nA & B < C > D",
+            r"&amp;copy; \| \\ \` \* \_ &lt;b&gt;x&lt;/b&gt;<br>A &amp; B &lt; C &gt; D",
+            r"&copy; \| \\ \` \* \_ <b>x</b><br>A & B < C > D",
+        ),
+    ],
+)
+def test_r1_pipe_table_check_authenticates_exact_renderer_serialization(
+    authored, escaped, active
+):
+    rows = [["Head", "Other"], [authored, "ok"]]
+    prov = [["h0", "h1"], ["d0", "d1"]]
+    sem = _doc(_table(rows, prov=prov))
+    d = ced(_cells_ced(rows, prov))
+    md = render_markdown(sem)
+    assert escaped in md
+    ok = _run(markdown=md, semantic=sem, ced=d, source_page_text={1: ""})
+    assert "literal_mismatch" not in _types(ok)
+
+    mutated = md.replace(escaped, active, 1)
+    bad = _run(markdown=mutated, semantic=sem, ced=d, source_page_text={1: ""})
+    assert any(i.issue_type == "literal_mismatch" for i in bad.issues)
+
+
+@pytest.mark.parametrize(
+    ("authored", "escaped", "active", "issue_type"),
+    [
+        ("a|b", r"a\|b", "a|b", "table_shape"),
+        (r"a\b", r"a\\b", r"a\b", "literal_mismatch"),
+        ("a`b", r"a\`b", "a`b", "literal_mismatch"),
+        ("a*b", r"a\*b", "a*b", "literal_mismatch"),
+        ("a_b", r"a\_b", "a_b", "literal_mismatch"),
+    ],
+)
+def test_r1_pipe_table_check_authenticates_every_required_escape(
+    authored, escaped, active, issue_type
+):
+    rows = [["Head", "Other"], [authored, "ok"]]
+    prov = [["h0", "h1"], ["d0", "d1"]]
+    sem = _doc(_table(rows, prov=prov))
+    d = ced(_cells_ced(rows, prov))
+    md = render_markdown(sem)
+    ok = _run(markdown=md, semantic=sem, ced=d, source_page_text={1: ""})
+    assert "literal_mismatch" not in _types(ok)
+    assert "table_shape" not in _types(ok)
+
+    mutated = md.replace(escaped, active, 1)
+    bad = _run(markdown=mutated, semantic=sem, ced=d, source_page_text={1: ""})
+    assert issue_type in _types(bad)
+
+
+def test_r1_pipe_table_crlf_br_serialization_passes_and_removed_break_fails():
+    authored = "line one\r\nline two"
+    rows = [["Head", "Other"], [authored, "ok"]]
+    prov = [["h0", "h1"], ["d0", "d1"]]
+    sem = _doc(_table(rows, prov=prov))
+    d = ced(_cells_ced(rows, prov))
+    md = render_markdown(sem)
+    ok = _run(markdown=md, semantic=sem, ced=d, source_page_text={1: ""})
+    assert "literal_mismatch" not in _types(ok)
+
+    bad = _run(
+        markdown=md.replace("line one<br>line two", "line oneline two"),
+        semantic=sem, ced=d, source_page_text={1: ""},
+    )
+    assert "literal_mismatch" in _types(bad)
 
 
 # ======================================================================================
@@ -346,6 +422,71 @@ def test_h2_authentic_join_still_suppresses_a_false_reading_order_inversion():
     sem = _joined_semantic(_VALID_JOIN)
     r = _run(markdown=render_markdown(sem), semantic=sem, ced=d)
     assert "reading_order" not in _types(r)
+
+
+def _wrong_occurrence_ced():
+    return ced(
+        [
+            Seg("a", "The boundary starts inter-", (72, 100, 300, 112)),
+            Seg("b", "national material ends here.", (72, 112, 300, 124)),
+            Seg("c", "Closing material remains distinct.", (72, 150, 420, 162)),
+        ],
+        order=["a", "b", "c"],
+    )
+
+
+def _wrong_occurrence_transform():
+    return SegmentTransform(
+        kind="dehyphenate", permitted_by="FR-014", segment_ids=("a", "b"),
+        joined_with="b", boundary="a/b", stage=3,
+    )
+
+
+@pytest.mark.parametrize("copies", [1, 2])
+def test_h2_joined_token_elsewhere_does_not_authenticate_or_suppress_coverage(copies):
+    d = _wrong_occurrence_ced()
+    elsewhere = " ".join(["international"] * copies)
+    sem = SemanticDocument(
+        blocks=(
+            _para(f"The boundary was omitted. Elsewhere: {elsewhere}.", ("a", "b")),
+            _para("Closing material remains distinct.", ("c",)),
+        ),
+        segment_transforms=(_wrong_occurrence_transform(),),
+    )
+    assert authenticated_dehyphenations(sem, d) == ()
+    r = _run(
+        markdown=render_markdown(sem), semantic=sem, ced=d,
+        source_page_text={1: (
+            "The boundary starts inter- national material ends here. "
+            "Closing material remains distinct."
+        )},
+    )
+    assert {"inter", "national"} <= set(r.missing_tokens)
+    assert "missing_content" in _types(r)
+
+
+def test_h2_wrong_boundary_occurrence_cannot_suppress_reading_order():
+    d = _wrong_occurrence_ced()
+    sem = SemanticDocument(
+        blocks=(
+            _para(
+                "national material ends here. The boundary starts inter- "
+                "international elsewhere.",
+                ("a", "b"),
+            ),
+            _para("Closing material remains distinct.", ("c",)),
+        ),
+        segment_transforms=(_wrong_occurrence_transform(),),
+    )
+    assert authenticated_dehyphenations(sem, d) == ()
+    r = _run(
+        markdown=render_markdown(sem), semantic=sem, ced=d,
+        source_page_text={1: (
+            "The boundary starts inter- national material ends here. "
+            "Closing material remains distinct."
+        )},
+    )
+    assert "reading_order" in _types(r)
 
 
 # ======================================================================================
@@ -562,6 +703,61 @@ def test_r5_html_span_table_multiline_cell_roundtrips_then_mutation_fails():
     assert any(i.issue_type == "literal_mismatch" for i in r.issues)
 
 
+@pytest.mark.parametrize(
+    ("authoritative", "mutation"),
+    [("é", "e\u0301"), ("e\u0301", "é")],
+)
+def test_r5_html_table_literal_comparison_preserves_exact_unicode_codepoints(
+    authoritative, mutation
+):
+    rows = [["Head"], [authoritative]]
+    prov = [["h"], ["d"]]
+    sem = _doc(_table(rows, prov=prov, merged=True))
+    d = ced(_cells_ced(rows, prov))
+    md = render_markdown(sem)
+    ok = _run(markdown=md, semantic=sem, ced=d, source_page_text={1: ""})
+    assert "literal_mismatch" not in _types(ok)
+
+    bad = _run(
+        markdown=md.replace(authoritative, mutation, 1), semantic=sem, ced=d,
+        source_page_text={1: ""},
+    )
+    assert any(i.issue_type == "literal_mismatch" for i in bad.issues)
+
+
+def test_r5_html_exact_escaped_unicode_and_html_characters_pass():
+    authored = "é e\u0301 <tag> & >"
+    rows = [["Head"], [authored]]
+    prov = [["h"], ["d"]]
+    sem = _doc(_table(rows, prov=prov, merged=True))
+    d = ced(_cells_ced(rows, prov))
+    md = render_markdown(sem)
+    assert "é e\u0301 &lt;tag&gt; &amp; &gt;" in md
+    r = _run(markdown=md, semantic=sem, ced=d, source_page_text={1: ""})
+    assert "literal_mismatch" not in _types(r)
+
+
+@pytest.mark.parametrize("line_break", ["\n", "\r\n", "\r"])
+def test_r5_table_cell_line_break_contract_passes_exactly(line_break):
+    authored = f"line one{line_break}line two"
+    rows = [["Head"], [authored]]
+    prov = [["h"], ["d"]]
+    sem = _doc(_table(rows, prov=prov, merged=True))
+    d = ced(_cells_ced(rows, prov))
+    md = render_markdown(sem)
+    assert "line one<br>line two" in md
+    ok = _run(markdown=md, semantic=sem, ced=d, source_page_text={1: ""})
+    assert "literal_mismatch" not in _types(ok)
+
+    for mutated in (
+        md.replace("line one<br>line two", "line oneline two"),
+        md.replace("line one<br>line two", "line one<br><br>line two"),
+        md.replace("line one<br>line two", "line one<br> line two"),
+    ):
+        bad = _run(markdown=mutated, semantic=sem, ced=d, source_page_text={1: ""})
+        assert any(i.issue_type == "literal_mismatch" for i in bad.issues)
+
+
 # ======================================================================================
 # combined interaction regression — valid output is clean, each mutation is caught
 # ======================================================================================
@@ -576,11 +772,11 @@ def _combined_ced():
                 (72, 100, 420, 112), page=1),
             Seg("p_h0", "Tag", (72, 60, 120, 72), page=2),
             Seg("p_h1", "Note", (140, 60, 200, 72), page=2),
-            Seg("p_d0", "<b>x</b>", (72, 74, 120, 86), page=2),
+            Seg("p_d0", "&copy; <b>x</b>", (72, 74, 120, 86), page=2),
             Seg("p_d1", "a & b", (140, 74, 220, 86), page=2),
             Seg("s_h", "Region", (72, 60, 200, 72), page=3),
-            Seg("s_l", "North", (72, 74, 130, 86), page=3),
-            Seg("s_r", "South", (140, 74, 200, 86), page=3),
+            Seg("s_l", "Café", (72, 74, 130, 86), page=3),
+            Seg("s_r", "line one line two", (140, 74, 240, 98), page=3),
         ],
         order=["d0", "d1", "d2", "p_h0", "p_h1", "p_d0", "p_d1", "s_h", "s_l", "s_r"],
     )
@@ -591,7 +787,7 @@ def _combined_semantic() -> SemanticDocument:
         "The consolidated figure is international and fully audited.", ("d0", "d1")
     )
     para_num = _para("Each international total stands at 1.599,80 today.", ("d2",))
-    pipe_tbl = _table([["Tag", "Note"], ["<b>x</b>", "a & b"]],
+    pipe_tbl = _table([["Tag", "Note"], ["&copy; <b>x</b>", "a & b"]],
                       prov=[["p_h0", "p_h1"], ["p_d0", "p_d1"]])
     span_tbl = TableBlock(
         kind="table", block_id="blk-cs",
@@ -600,8 +796,9 @@ def _combined_semantic() -> SemanticDocument:
             rows=[
                 [TableCell(text="Region", provenance=("s_h",), row=0, column=0,
                            colspan=2, is_header=True)],
-                [TableCell(text="North", provenance=("s_l",), row=1, column=0),
-                 TableCell(text="South", provenance=("s_r",), row=1, column=1)],
+                [TableCell(text="Café", provenance=("s_l",), row=1, column=0),
+                 TableCell(text="line one\r\nline two", provenance=("s_r",), row=1,
+                           column=1)],
             ],
             has_merged_cells=True, header_row_count=1, spans_pages=[3],
         ),
@@ -622,8 +819,8 @@ def _combined_source():
     return {
         1: "The consolidated figure is inter- national and fully audited. "
            "Each international total stands at 1.599,80 today.",
-        2: "Tag Note <b>x</b> a & b",
-        3: "Region North South",
+        2: "Tag Note &copy; <b>x</b> a & b",
+        3: "Region Café line one line two",
     }
 
 
@@ -632,7 +829,8 @@ def test_combined_valid_output_is_clean():
     d = _combined_ced()
     assert len(authenticated_dehyphenations(sem, d)) == 1
     md = render_markdown(sem)
-    assert "&lt;b&gt;x&lt;/b&gt;" in md and "<b>" not in md
+    assert "&amp;copy; &lt;b&gt;x&lt;/b&gt;" in md and "<b>" not in md
+    assert "<td>Café</td><td>line one<br>line two</td>" in md
     r = _run(markdown=md, semantic=sem, ced=d, source_page_text=_combined_source())
     assert r.issues == ()
     assert r.source_text_match_rate == 1.0
@@ -646,30 +844,42 @@ def test_combined_each_single_defect_mutation_is_caught_without_masking():
     base = render_markdown(sem)
 
     # HIGH 1 surface: flip an escaped pipe-cell HTML char in the render
-    m1 = base.replace("&lt;b&gt;x&lt;/b&gt;", "&lt;b&gt;z&lt;/b&gt;")
+    m1 = base.replace("&amp;copy; &lt;b&gt;x&lt;/b&gt;", "&copy; <b>x</b>")
     r1 = _run(markdown=m1, semantic=sem, ced=d, source_page_text=src)
-    assert any(i.expected == "<b>x</b>" and i.found == "<b>z</b>" for i in r1.issues
-               if i.issue_type == "literal_mismatch")
+    assert any(i.issue_type == "literal_mismatch" for i in r1.issues)
 
     # HIGH 2 surface: forge the dehyphenation record → the dropped join surfaces show
     forged_sem = replace(
         sem,
-        segment_transforms=(replace(sem.segment_transforms[0], permitted_by="FR-999"),),
+        blocks=(
+            replace(
+                sem.blocks[0],
+                text=(
+                    "The consolidated figure omitted its boundary; international "
+                    "appears elsewhere."
+                ),
+            ),
+            *sem.blocks[1:],
+        ),
     )
-    r2 = _run(markdown=base, semantic=forged_sem, ced=d, source_page_text=src)
+    assert authenticated_dehyphenations(forged_sem, d) == ()
+    r2 = _run(
+        markdown=render_markdown(forged_sem), semantic=forged_sem, ced=d,
+        source_page_text=src,
+    )
     assert {"inter", "national"} <= set(r2.missing_tokens)
     assert "missing_content" in _types(r2)
 
-    # HIGH 3 surface: swap the HTML span-table body cells
-    m3 = base.replace("<td>North</td><td>South</td>", "<td>South</td><td>North</td>")
+    # HIGH 3 surface: a visually equivalent Unicode sequence is still not exact
+    m3 = base.replace("<td>Café</td>", "<td>Cafe\u0301</td>")
     r3 = _run(markdown=m3, semantic=sem, ced=d, source_page_text=src)
-    assert {"North", "South"} <= {i.expected for i in r3.issues
-                                  if i.issue_type == "literal_mismatch"}
+    assert any(i.expected == "Café" for i in r3.issues
+               if i.issue_type == "literal_mismatch")
 
-    # HIGH 3 surface: corrupt the merged-header colspan
-    m4 = base.replace('colspan="2"', 'colspan="4"')
+    # MEDIUM surface: removing one renderer-defined cell line break is literal loss
+    m4 = base.replace("line one<br>line two", "line oneline two")
     r4 = _run(markdown=m4, semantic=sem, ced=d, source_page_text=src)
-    assert "table_shape" in _types(r4)
+    assert "literal_mismatch" in _types(r4)
 
     # numeric literal integrity still independently enforced
     m5 = base.replace("1.599,80", "1599.80")
@@ -679,7 +889,7 @@ def test_combined_each_single_defect_mutation_is_caught_without_masking():
 
     # duplicated header injected into the span table
     lines = base.split("\n")
-    lines.insert(lines.index("<tr><td>North</td><td>South</td></tr>"),
+    lines.insert(lines.index("<tr><td>Café</td><td>line one<br>line two</td></tr>"),
                  '<tr><th colspan="2">Region</th></tr>')
     r6 = _run(markdown="\n".join(lines), semantic=sem, ced=d, source_page_text=src)
     assert "duplicated_header" in _types(r6)

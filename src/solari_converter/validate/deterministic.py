@@ -49,6 +49,10 @@ from solari_converter.model.canonical import (
     CanonicalExtractedDocument,
 )
 from solari_converter.model.semantic import SemanticDocument
+from solari_converter.render.markdown import (
+    serialize_html_cell_text,
+    serialize_pipe_cell,
+)
 from solari_converter.transform.build_semantic import authenticated_dehyphenations
 from solari_converter.transform.reflow import SegmentTransform
 from solari_converter.transform.tables import TableBlock, TableCell
@@ -520,8 +524,8 @@ class _PCell:
     rowspan: int
     colspan: int
     text: str           # NFC-casefold-stripped; loose, header-repeat heuristic only
-    body: str           # authored literal recovered via the renderer's exact escaping
-    #                     contract (NFC, case-sensitive) — the cell-integrity comparand
+    body: str           # exact decoded codepoints, with only table line breaks canonical
+    serialized: str     # exact renderer-defined cell payload; integrity comparand
 
 
 @dataclass(frozen=True)
@@ -536,7 +540,7 @@ class _ParsedTable:
 
 
 def _ecell(cell: TableCell, *, pipe: bool) -> _PCell:
-    body = _norm(cell.text)
+    body = _table_cell_lines(cell.text)
     return _PCell(
         "th" if cell.is_header else "td",
         max(1, cell.rowspan),
@@ -544,6 +548,11 @@ def _ecell(cell: TableCell, *, pipe: bool) -> _PCell:
         _cnorm(cell.text),
         # a Markdown pipe cell is whitespace-trimmed by the reader; an HTML cell is not
         body.strip() if pipe else body,
+        (
+            serialize_pipe_cell(cell.text).strip()
+            if pipe
+            else serialize_html_cell_text(cell.text)
+        ),
     )
 
 
@@ -675,18 +684,20 @@ def _check_one_table(
             # this logical row / column — accounting only for the renderer's own
             # escaping / whitespace-trim contract. A swapped, moved, or edited cell
             # fails here even when every tag / span count is unchanged.
-            if rc.body != ec.body:
+            if rc.serialized != ec.serialized:
+                decoded_differs = rc.body != ec.body
                 emitter.add(
                     severity="error", source_page=page, markdown_line=line,
                     markdown_column=1, issue_type="literal_mismatch",
                     description=(
                         f"the table at Markdown line {line}, row {r}, column {c} "
-                        f"renders cell text {rc.body!r}; the reconstructed table cell "
-                        f"at that logical position is {ec.body!r} — a swapped, moved, "
-                        "or altered table cell (FR-020/SC-025)"
+                        f"renders cell payload {rc.serialized!r}; the renderer-defined "
+                        f"payload at that logical position is {ec.serialized!r} — a "
+                        "swapped, moved, altered, or incorrectly escaped table cell "
+                        "(FR-020/SC-025)"
                     ),
-                    expected=ec.body,
-                    found=rc.body,
+                    expected=ec.body if decoded_differs else ec.serialized,
+                    found=rc.body if decoded_differs else rc.serialized,
                 )
             diffs: list[str] = []
             if rc.tag != ec.tag:
@@ -792,7 +803,8 @@ def _pipe_pcell(raw: str, row_index: int) -> _PCell:
         "th" if row_index == 0 else "td",
         1, 1,
         _cnorm(plain),
-        _norm(plain).strip(),
+        _table_cell_lines(plain).strip(),
+        raw,
     )
 
 
@@ -811,7 +823,8 @@ def _parse_html_table(block: list[str], line: int) -> _ParsedTable:
                     int(rs.group(1)) if rs else 1,
                     int(cs.group(1)) if cs else 1,
                     _cnorm(plain),
-                    _norm(plain),
+                    _table_cell_lines(plain),
+                    content,
                 )
             )
         rows.append(tuple(cells))
@@ -825,6 +838,15 @@ def _html_unescape(text: str) -> str:
         .replace("&gt;", ">")
         .replace("&amp;", "&")
     )
+
+
+def _table_cell_lines(text: str) -> str:
+    """Validation-only interpretation of the renderer's ``<br>`` contract.
+
+    CRLF, LF, and CR are the only authored sequences folded by both table renderers;
+    no other whitespace or Unicode codepoint is normalised here.
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 # --- reading order ----------------------------------------------------------
