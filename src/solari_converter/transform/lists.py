@@ -105,17 +105,48 @@ class _Lead:
     identifier: str
 
 
+#: Separators a bare clause marker may be followed by before its body text.
+_CLAUSE_SEP_CHARS = " .)–—-\t"
+
+#: The keyword half of ``_KEYWORD_CLAUSE_RE`` on its own — an explicit
+#: ``Article`` / ``Cláusula`` / … keyword is unambiguous clause evidence; a *bare*
+#: Roman numeral matched by that same regex's second alternative is not.
+_KEYWORD_WORD_RE = re.compile(
+    r"^(?:Article|Section|Clause|Part|Artigo|Cl[aá]usula|Se[cç][aã]o|"
+    r"Cap[ií]tulo|Parte|Par[aá]grafo)\b",
+    re.IGNORECASE,
+)
+
+
+def _reads_like_clause_body(rest: str) -> bool:
+    """A bare numeric- or Roman-looking prefix only starts a legal clause when what
+    follows reads like a clause heading rather than the continuation of a sentence:
+    its first cased letter is upper-case (``IV. Governing law`` — yes;
+    ``I. am available tomorrow`` — no; ``1.5 million residents voted`` — no). Ambiguous
+    or lower-case-leading ⇒ not a clause, ordinary body content (R5). Only evidence
+    already carried by the segment literal is used; the text itself is never altered."""
+    body = rest.lstrip(_CLAUSE_SEP_CHARS)
+    for ch in body:
+        if ch.isalpha():
+            return ch.isupper()
+    return False  # nothing but separators / digits after the marker — not a clause
+
+
 def _classify_leading(text: str) -> _Lead | None:
     s = unicodedata.normalize("NFC", text)
 
     m = _KEYWORD_CLAUSE_RE.match(s)
     if m:
-        return _Lead("clause", "", "", True, m.group("id").strip())
+        ident = m.group("id").strip()
+        # an explicit keyword is unambiguous; a bare Roman numeral matched by the same
+        # regex's second alternative needs a clause-like body (R5).
+        if _KEYWORD_WORD_RE.match(ident) or _reads_like_clause_body(s[m.end():]):
+            return _Lead("clause", "", "", True, ident)
     m = _DOTTED_CLAUSE_RE.match(s)
-    if m and s[m.end():].strip():
+    if m and s[m.end():].strip() and _reads_like_clause_body(s[m.end():]):
         return _Lead("clause", "", "", True, m.group("id"))
     m = _ROMAN_CLAUSE_RE.match(s)
-    if m and s[m.end():].strip():
+    if m and s[m.end():].strip() and _reads_like_clause_body(s[m.end():]):
         return _Lead("clause", "", "", True, m.group("id"))
 
     m = _BULLET_RE.match(s)

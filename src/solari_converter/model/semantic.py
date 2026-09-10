@@ -25,7 +25,7 @@ from typing import Literal
 
 from solari_converter.reports.removal_log import RemovalLog
 from solari_converter.transform.reflow import HintDecision, SegmentTransform
-from solari_converter.transform.tables import StructuralReorder, TableBlock
+from solari_converter.transform.tables import CollapsedHeader, StructuralReorder, TableBlock
 
 __all__ = [
     "block_id",
@@ -35,6 +35,7 @@ __all__ = [
     "ListBlock",
     "ClauseBlock",
     "TableBlock",
+    "CollapsedHeader",
     "Block",
     "SemanticDocument",
 ]
@@ -121,3 +122,12 @@ class SemanticDocument:
     table_owned_segment_ids: frozenset[str] = field(default_factory=frozenset)
     collapsed_segment_ids: frozenset[str] = field(default_factory=frozenset)
     removed_segment_ids: frozenset[str] = field(default_factory=frozenset)
+    #: T070's :class:`~solari_converter.transform.tables.CollapsedHeader` records —
+    #: carried forward **verbatim** (same "reuse, don't re-model" rule as
+    #: :class:`TableBlock`). ``collapsed_segment_ids`` above stays the flat set the
+    #: set-level accounting invariant uses; this keeps the per-collapse
+    #: continuation-header → retained-header mapping (``per_cell`` column pairing +
+    #: ``kept_header_segment_ids``) that the downstream ``RenderMap.collapsed_segments``
+    #: ``collapsed_into`` edge (data-model.md, research §25.2/§25.7, FR-021) needs —
+    #: information the flat set discards. Additive; no schema (this model is ephemeral).
+    collapsed_headers: tuple[CollapsedHeader, ...] = ()

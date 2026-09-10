@@ -40,13 +40,22 @@ from solari_converter.model.semantic import (
     SemanticDocument,
     block_id,
 )
+from solari_converter.reconcile.confidence import comparison_key
 from solari_converter.transform.artifacts import remove_artifacts
 from solari_converter.transform.lists import ClauseNode, ListItemNode, reconstruct_lists
 from solari_converter.transform.reflow import ReflowResult, reflow
 from solari_converter.transform.structure import infer_structure
 from solari_converter.transform.tables import StructuralReorder, TableBlock, build_tables
 
-__all__ = ["build_semantic"]
+__all__ = ["build_semantic", "literal_accounting_violations", "LiteralAccountingError"]
+
+
+class LiteralAccountingError(ValueError):
+    """Raised when the R8 literal-level fidelity invariant is violated — a source
+    segment is nominally retained (its id sits in a block's provenance, and it is
+    neither collapsed nor artifact-removed) yet its literal has silently vanished
+    from the rendered-semantic content with no permitted transform to account for it.
+    This is the R1 class of defect; it must never pass unnoticed."""
 
 
 def build_semantic(ced: CanonicalExtractedDocument) -> SemanticDocument:
@@ -84,7 +93,7 @@ def build_semantic(ced: CanonicalExtractedDocument) -> SemanticDocument:
 
     segment_transforms = (*tables_result.transforms, *kept_reflow.transforms)
 
-    return SemanticDocument(
+    semantic = SemanticDocument(
         blocks=tuple(all_blocks),
         structural_reorder=(*tables_result.structural_reorder, *fr021_reorders),
         segment_transforms=segment_transforms,
@@ -92,7 +101,103 @@ def build_semantic(ced: CanonicalExtractedDocument) -> SemanticDocument:
         table_owned_segment_ids=tables_result.consumed_segment_ids,
         collapsed_segment_ids=collapsed_ids,
         removed_segment_ids=artifact_result.removed_segment_ids,
+        collapsed_headers=tuple(tables_result.collapsed_headers),
     )
+
+    # R8 — the literal-level fidelity invariant, enforced at the semantic boundary so
+    # the R1 class of silent literal disappearance can never pass unnoticed.
+    offenders = literal_accounting_violations(semantic, ced)
+    if offenders:
+        raise LiteralAccountingError(
+            "retained-in-provenance source segments whose literal has no rendered "
+            f"representation and no permitted transform: {offenders}"
+        )
+    return semantic
+
+
+# --- R8: literal-level semantic accounting invariant --------------------------------
+
+
+def _norm(text: str) -> str:
+    """The module-wide comparison-only normal form (NFC → smart-quote fold →
+    whitespace-collapse) plus casefold — the same non-materiality bar
+    ``transform/tables.py`` uses for repeated-header collapse. Never stored."""
+    return comparison_key(text).casefold()
+
+
+def _carrier_units(block: Block) -> list[tuple[str, tuple[str, ...]]]:
+    """``(rendered-text, contributing-segment-ids)`` pairs for one block — the units
+    whose text must still carry each of their provenance segments' literals."""
+    if block.kind == "table":
+        return [
+            (c.text, c.provenance)
+            for row in block.table.rows for c in row if c.provenance
+        ]
+    if block.kind == "list":
+        return [(it.text, it.segment_ids) for it in block.items]
+    return [(block.text, block.provenance)]  # heading / paragraph / clause
+
+
+def literal_accounting_violations(
+    semantic: SemanticDocument, ced: CanonicalExtractedDocument
+) -> list[str]:
+    """The R8 fidelity invariant — strictly stronger than the set-level
+    ``retained ⊎ collapsed ⊎ removed == accepted``.
+
+    **Invariant.** For every accepted segment that is *nominally retained* — its id
+    appears in some block's ``provenance`` and it is neither in
+    ``collapsed_segment_ids`` nor in ``removed_segment_ids`` — its CED literal MUST
+    still be represented in the rendered-semantic content:
+
+    * its normalised literal is a substring of the normalised text of some carrier
+      unit (paragraph / heading / clause / list item / table cell) that names it in
+      provenance — **or**
+    * the segment participates in a recorded ``dehyphenate`` :class:`SegmentTransform`
+      (the one closed-enum transform that legitimately changes a segment's own
+      characters at a line boundary; ``reflow_whitespace`` only inserts a separator
+      *between* literals, so the substring check still holds under whitespace
+      normalisation).
+
+    Whitespace-, case- and smart-quote-only differences are non-material (the frozen
+    ``comparison_key`` rule, casefolded — the same bar this pipeline already uses for
+    repeated-header collapse). Anything else — an id retained in provenance whose
+    literal has silently disappeared — is a violation (the R1 class).
+
+    Returns the sorted list of offending segment ids; empty ⇒ the invariant holds.
+    """
+    ced_text = {s.segment_id: s.text for s in ced.accepted_segments}
+
+    boundary_changed = {
+        sid
+        for t in semantic.segment_transforms
+        if t.kind == "dehyphenate"
+        for sid in t.segment_ids
+    }
+
+    carriers: dict[str, list[str]] = {}
+    for b in semantic.blocks:
+        for text, prov in _carrier_units(b):
+            normalised = _norm(text)
+            for sid in prov:
+                carriers.setdefault(sid, []).append(normalised)
+
+    retained = (
+        {sid for b in semantic.blocks for sid in b.provenance}
+        - set(semantic.collapsed_segment_ids)
+        - set(semantic.removed_segment_ids)
+    )
+
+    violations: list[str] = []
+    for sid in sorted(retained):
+        if sid in boundary_changed:
+            continue
+        literal = _norm(ced_text.get(sid, ""))
+        if not literal:
+            continue  # an empty / whitespace-only literal contributes no characters
+        if any(literal in carrier for carrier in carriers.get(sid, [])):
+            continue
+        violations.append(sid)
+    return violations
 
 
 def _anchor(block: Block, accepted_index: dict[str, int]) -> int:

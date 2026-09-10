@@ -330,6 +330,14 @@ def _hint_ref(h) -> str:
     return f"{h.segment_id}:{h.kind}:{h.source_technique}:{h.level}"
 
 
+def _hint_decision_key(d: HintDecision) -> tuple[str, bool, str]:
+    """The single canonical ordering for every ``HintDecision`` sequence this module
+    emits — ``TablesResult.hint_decisions`` **and** every ``TableBlock.hint_decisions``
+    (R6). Two runs whose only difference is the order of equivalent carried-hint
+    containers must produce byte-identical decision sequences."""
+    return (d.hint_ref, d.applied, d.reason)
+
+
 def _digest(prefix: str, payload: str) -> str:
     return prefix + hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
@@ -548,12 +556,7 @@ class _Builder:
             ambiguities=tuple(
                 sorted(self.ambiguities, key=lambda a: (a.scope, a.kind, a.segment_ids))
             ),
-            hint_decisions=tuple(
-                sorted(
-                    self.hint_decisions,
-                    key=lambda d: (d.hint_ref, d.applied, d.reason),
-                )
-            ),
+            hint_decisions=tuple(sorted(self.hint_decisions, key=_hint_decision_key)),
             transforms=tuple(self.transforms),
             consumed_segment_ids=frozenset(self.consumed),
         )
@@ -657,6 +660,18 @@ class _Builder:
             return None
 
         grid, span_amb = self._assign_cells(group, bands, clusters, page, scope)
+        if grid is None:
+            # R1: two distinct source literals resolved to one grid anchor and no
+            # deterministic rule can represent both faithfully — abandon the whole
+            # table fragment. Neither literal is dropped, neither id is consumed; the
+            # region flows to ordinary non-table semantic processing instead.
+            self._record_hint_decisions(
+                {s.segment_id for s in group}, applied=False,
+                reason="two source segments with materially distinct literals resolve "
+                "to the same table cell — table reconstruction abandoned; region left "
+                "for ordinary semantic processing",
+            )
+            return None
         grid = self._merge_wrapped_cells(grid, bands, clusters, page, scope)
 
         non_empty_rows = sum(1 for r in grid if any(not c.is_empty for c in r))
@@ -715,7 +730,11 @@ class _Builder:
         clusters: list[_Cluster],
         page: int,
         scope: str,
-    ) -> tuple[list[list[TableCell]], list[TableAmbiguity]]:
+    ) -> tuple[list[list[TableCell]] | None, list[TableAmbiguity]]:
+        """Assign each source segment to a grid cell. Returns ``(None, span_amb)`` when
+        two source segments with materially distinct literals resolve to the same
+        anchor and neither an existing deterministic collapse rule nor faithful
+        separate representation applies — the caller then abandons the fragment (R1)."""
         nrows, ncols = len(bands), len(clusters)
         anchors: dict[tuple[int, int], TableCell] = {}
         covered: set[tuple[int, int]] = set()
@@ -757,24 +776,44 @@ class _Builder:
                     )
             key = (r0, c0)
             if key in anchors:
-                # a second segment landed on the same anchor position: keep the
-                # source-order-first literal, record every id, flag the collision.
                 prev = anchors[key]
-                anchors[key] = TableCell(
-                    text=prev.text,
-                    provenance=prev.provenance + (s.segment_id,),
-                    row=r0, column=c0, rowspan=prev.rowspan, colspan=prev.colspan,
-                    is_header=prev.is_header, page=page,
-                )
-                span_amb.append(
-                    TableAmbiguity(
-                        "hint_conflict", scope,
-                        tuple(sorted(anchors[key].provenance)),
-                        "two segments resolve to the same grid position; "
-                        "kept the source-order-first literal",
+                if _key(prev.text) == _key(s.text):
+                    # Equivalent evidence — the difference is whitespace / case /
+                    # smart-quote only, the same non-materiality bar this module
+                    # already uses for repeated-header collapse (``_row_keys``). The
+                    # retained literal faithfully represents both segments; record
+                    # every contributing id and continue.
+                    anchors[key] = TableCell(
+                        text=prev.text,
+                        provenance=prev.provenance + (s.segment_id,),
+                        row=r0, column=c0, rowspan=prev.rowspan, colspan=prev.colspan,
+                        is_header=prev.is_header, page=page,
                     )
+                    span_amb.append(
+                        TableAmbiguity(
+                            "equivalent_cell_evidence_collapsed", scope,
+                            tuple(sorted(anchors[key].provenance)),
+                            "two segments with equivalent literals resolve to the same "
+                            "grid position; kept one literal, both ids retained",
+                        )
+                    )
+                    continue
+                # R1: two DISTINCT source literals at one anchor. Appending the second
+                # id to provenance while its literal has no cell representation is
+                # forbidden — a source segment must never be considered semantically
+                # retained merely because its id appears in provenance. No silent
+                # merge, no speculative concatenation, no invented row/column, no
+                # discarded literal: abandon the whole table fragment conservatively.
+                self._ambiguity(
+                    "same_anchor_literal_collision", scope,
+                    (prev.provenance[0], s.segment_id),
+                    f"source segments {prev.provenance[0]!r} and {s.segment_id!r} "
+                    f"carry distinct literals but both resolve to row {r0}, column "
+                    f"{c0}; faithful table representation of both is impossible — "
+                    "table reconstruction abandoned, region left for ordinary "
+                    "semantic processing",
                 )
-                continue
+                return None, span_amb
             anchors[key] = TableCell(
                 text=s.text,
                 provenance=(s.segment_id,),
@@ -1098,8 +1137,13 @@ class _Builder:
                 table=table,
                 provenance=provenance,
                 hint_decisions=tuple(
-                    d for d in self.hint_decisions
-                    if d.hint_ref.split(":", 1)[0] in set(all_ids)
+                    sorted(
+                        (
+                            d for d in self.hint_decisions
+                            if d.hint_ref.split(":", 1)[0] in set(all_ids)
+                        ),
+                        key=_hint_decision_key,
+                    )
                 ),
             )
             blocks.append(block)

@@ -170,11 +170,36 @@ def infer_structure(
             _heading_hints(ced, unit),
             key=lambda h: (h.segment_id, h.kind, h.source_technique, h.level or 0),
         )
+        # R4: conflicting *explicit* heading levels are a real disagreement. The
+        # deterministic tie-break is the source's own numbering depth — never the
+        # lexical order of the extractor names. If nothing frozen resolves the
+        # conflict, no hint is applied and no heading level is invented.
+        explicit_levels = sorted({h.level for h in hints if h.level is not None})
+        conflict = len(explicit_levels) > 1
+        resolved_level: int | None = (
+            depth if conflict and depth and depth in explicit_levels else None
+        )
+        no_signal_reason = (
+            "no corroborating deterministic signal "
+            f"(words={words}, prose_end={prose_end}, "
+            f"numbering={numbering!r}, title-ish={titlish})"
+        )
+
         decisions: list[HintDecision] = []
         applied_level: int | None = None
+        applied_any = False
         for h in hints:
-            if corroborated and applied_level is None:
-                applied_level = h.level
+            can_apply = corroborated and not applied_any
+            if can_apply and conflict:
+                # exactly one deterministic decision per source block: apply only the
+                # hint whose explicit level the numbering depth corroborates — never
+                # the lexically-first extractor
+                can_apply = resolved_level is not None and h.level == resolved_level
+
+            if can_apply:
+                applied_any = True
+                if h.level is not None:
+                    applied_level = h.level
                 decisions.append(
                     HintDecision(
                         hint_ref=_hint_ref(h), kind=h.kind, applied=True,
@@ -188,17 +213,32 @@ def infer_structure(
                                     ("title-case/uppercase", titlish),
                                 ) if ok
                             )
+                            + (
+                                f"; explicit level {h.level} corroborated by "
+                                f"numbering depth {depth}"
+                                if conflict else ""
+                            )
                         ),
                     )
                 )
             else:
-                reason = (
-                    "another heading hint was already applied to this unit"
-                    if applied_level is not None
-                    else "no corroborating deterministic signal "
-                    f"(words={words}, prose_end={prose_end}, "
-                    f"numbering={numbering!r}, title-ish={titlish})"
-                )
+                if not corroborated:
+                    reason = no_signal_reason
+                elif conflict and resolved_level is None:
+                    reason = (
+                        f"conflicting explicit heading levels {explicit_levels}; no "
+                        "deterministic evidence resolves the conflict — hint not "
+                        "applied, no heading level invented"
+                    )
+                elif conflict and h.level is not None and h.level != resolved_level:
+                    reason = (
+                        f"explicit level {h.level} conflicts with the "
+                        f"numbering-depth-corroborated level {resolved_level}"
+                    )
+                elif applied_any:
+                    reason = "another heading hint was already applied to this unit"
+                else:
+                    reason = no_signal_reason
                 decisions.append(
                     HintDecision(
                         hint_ref=_hint_ref(h), kind=h.kind, applied=False, reason=reason
@@ -206,7 +246,7 @@ def infer_structure(
                 )
         all_decisions.extend(decisions)
 
-        is_heading = any(d.applied for d in decisions)
+        is_heading = applied_any
         level: int | None = None
         if is_heading:
             if applied_level is not None:

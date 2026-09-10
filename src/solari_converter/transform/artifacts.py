@@ -76,6 +76,13 @@ __all__ = [
 #: position-consistency checks stitch transparency never applies.
 HEADER_FOOTER_MIN_PAGES: int = 2
 
+#: Carried structural-hint kinds that mark a repeated segment as *meaningful content*
+#: (a recurring section title, a figure caption). Their presence weighs against
+#: furniture removal — an ambiguous repeat is kept and recorded, never removed (R2).
+STRUCTURAL_CONTENT_HINT_KINDS: frozenset[str] = frozenset(
+    {"heading", "subheading", "caption"}
+)
+
 #: Repeated furniture must recur with its bbox top within this many PDF units on every
 #: counted page — position-consistency (own copy; not imported from ``transform.tables``,
 #: to keep this module's removal authority fully independent of T070's rule).
@@ -287,38 +294,73 @@ class _Detector:
                 return True
         return False
 
+    def _structural_content_evidence(self, unit: ReflowUnit) -> bool:
+        """A carried heading / subheading / caption hint on any of this unit's
+        segments — a recurring section title or figure caption is meaningful content;
+        its repetition must weigh *against* furniture removal (R2)."""
+        ids = set(unit.segment_ids)
+        return any(
+            h.segment_id in ids and h.kind in STRUCTURAL_CONTENT_HINT_KINDS
+            for h in self.ced.carried_structural_hints
+        )
+
     def _detect_repeated_header_footer(self) -> None:
         by_key: dict[str, list[ReflowUnit]] = {}
         for u in self._standalone:
             by_key.setdefault(_key(u.text), []).append(u)
 
         for key, units in by_key.items():
-            pages = {u.page for u in units}
-            if len(pages) < HEADER_FOOTER_MIN_PAGES:
-                continue
-            if len(pages) <= len(self.pages) / 2:
-                continue  # not a majority of the document's pages
-            bands = {self._margin_band(u) for u in units}
-            if bands - {"top", "bottom"} or None in bands or len(bands) != 1:
-                continue  # not margin-positioned, or inconsistent margin
-            tops = [self._bbox(u)[1] for u in units]  # type: ignore[index]
-            if max(tops) - min(tops) > FURNITURE_TOP_TOLERANCE:
-                continue  # not position-consistent across occurrences
             if not key:
                 continue
+            pages = {u.page for u in units}
+            if len(pages) < HEADER_FOOTER_MIN_PAGES:
+                continue  # a single occurrence can never establish repetition
+            bands = {self._margin_band(u) for u in units}
+            if bands - {"top", "bottom"} or None in bands or len(bands) != 1:
+                continue  # not margin-positioned at all — not a furniture candidate
+            tops = [self._bbox(u)[1] for u in units]  # type: ignore[index]
+            if max(tops) - min(tops) > FURNITURE_TOP_TOLERANCE:
+                continue  # not position-consistent — repeated content, not furniture
 
             band = next(iter(bands))
             element_type = "running_header" if band == "top" else "running_footer"
             exclude_ids = {u.segment_ids[0] for u in units}
-            ambiguous = self._body_contains(key, exclude_ids)
+
+            # R2: margin position + position-consistency are necessary but, on their
+            # own, cannot turn a short or discontinuous set of occurrences into
+            # removal authority. Each unmet condition below is a *keep* reason — an
+            # ambiguous repeat is kept and recorded, never silently dropped (FR-010).
+            pages_sorted = sorted(pages)
+            contiguous_run = pages_sorted == list(
+                range(pages_sorted[0], pages_sorted[-1] + 1)
+            )
+            majority = len(pages) > len(self.pages) / 2
+
+            keep_reasons: list[str] = []
+            if self._body_contains(key, exclude_ids):
+                keep_reasons.append(
+                    "identical text also appears in retained body content"
+                )
+            if any(self._structural_content_evidence(u) for u in units):
+                keep_reasons.append(
+                    "a carried heading/caption hint marks this as meaningful content"
+                )
+            if not contiguous_run:
+                keep_reasons.append(
+                    "the occurrence pages are discontinuous — a continuous running "
+                    "header/footer cannot be established from a discontinuous set"
+                )
+            if not majority:
+                keep_reasons.append(
+                    "the text repeats on only a minority of the selected pages"
+                )
+
+            remove = not keep_reasons
+            note = "; ".join(keep_reasons) or None
             for u in units:
                 self._decided[u.segment_ids[0]] = _Decision(
                     unit=u, element_type=element_type, reason="matched_repeated",
-                    remove=not ambiguous, kept_due_to_ambiguity=ambiguous,
-                    note=(
-                        "identical text also appears in retained body content"
-                        if ambiguous else None
-                    ),
+                    remove=remove, kept_due_to_ambiguity=not remove, note=note,
                 )
 
     # -- page numbers ---------------------------------------------------------
@@ -367,23 +409,45 @@ class _Detector:
             text = u.text.strip()
             seg = u.segments[0]
             tall_narrow = self._is_tall_narrow(seg)
+            # R3: pattern SHAPE alone never authorizes deleting author content. A
+            # genuine authentication stamp / protocol hash / OCR barcode sits in a
+            # page margin band (the same independent, already-available deterministic
+            # geometric signal page-number removal requires). A shape-only match in
+            # mid-body — a git commit hash quoted in a technical paragraph, a
+            # "Digitally signed…" sentence, an OCR-mangled identifier inside prose —
+            # is kept, recorded as ambiguous. Verticality alone remains insufficient.
+            in_margin = self._margin_band(u) is not None
 
-            if AUTH_PHRASE_RE.match(text) or AUTH_HEX_RE.match(text):
+            phrase_or_hex = AUTH_PHRASE_RE.match(text) or AUTH_HEX_RE.match(text)
+            barcode_shape = (
+                seg.source.origin_kind == "ocr"
+                and BARCODE_OCR_RUN_RE.match(text)
+                and " " not in text
+            )
+
+            if phrase_or_hex and in_margin:
                 element_type = "vertical_auth_text" if tall_narrow else "auth_stamp"
                 self._decided[sid] = _Decision(
                     unit=u, element_type=element_type, reason="matched_pattern",
                     remove=True, kept_due_to_ambiguity=False,
                 )
                 continue
-
-            if (
-                seg.source.origin_kind == "ocr"
-                and BARCODE_OCR_RUN_RE.match(text)
-                and " " not in text
-            ):
+            if barcode_shape and in_margin:
                 self._decided[sid] = _Decision(
                     unit=u, element_type="barcode", reason="matched_pattern",
                     remove=True, kept_due_to_ambiguity=False,
+                )
+                continue
+            if phrase_or_hex or barcode_shape:
+                element_type = (
+                    "barcode" if barcode_shape and not phrase_or_hex
+                    else "vertical_auth_text" if tall_narrow
+                    else "auth_stamp"
+                )
+                self._decided[sid] = _Decision(
+                    unit=u, element_type=element_type, reason="matched_pattern",
+                    remove=False, kept_due_to_ambiguity=True,
+                    note="pattern shape only, not in a page margin band — kept",
                 )
 
     @staticmethod
