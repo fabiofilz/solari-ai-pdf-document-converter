@@ -49,6 +49,8 @@ from solari_converter.model.canonical import (
     CanonicalExtractedDocument,
 )
 from solari_converter.model.semantic import SemanticDocument
+from solari_converter.transform.build_semantic import authenticated_dehyphenations
+from solari_converter.transform.reflow import SegmentTransform
 from solari_converter.transform.tables import TableBlock, TableCell
 
 __all__ = [
@@ -183,15 +185,22 @@ def _excluded_segment_ids(semantic: SemanticDocument) -> frozenset[str]:
 
 
 def _dehyphenation_pairs(
-    semantic: SemanticDocument, by_id: Mapping[str, AcceptedSegment]
+    transforms: Sequence[SegmentTransform], by_id: Mapping[str, AcceptedSegment]
 ) -> list[tuple[str, str]]:
-    """``(left_fragment, right_fragment)`` for every recorded ``dehyphenate`` transform
-    (FR-014) — the trailing word fragment before the joined ``U+002D`` and the leading
-    word of the following segment. After the join neither surface appears literally; the
-    merged token ``left+right`` does. Used to reconcile source-token expectations so a
-    legitimate ``inter-`` + ``national`` → ``international`` is not a false divergence."""
+    """``(left_fragment, right_fragment)`` for every **authenticated** ``dehyphenate``
+    transform (FR-014) — the trailing word fragment before the joined ``U+002D`` and the
+    leading word of the following segment. After the join neither surface appears
+    literally; the merged token ``left+right`` does. Used to reconcile source-token
+    expectations so a legitimate ``inter-`` + ``national`` → ``international`` is not a
+    false divergence.
+
+    ``transforms`` must already be the frozen-contract-authenticated subset
+    (:func:`solari_converter.transform.build_semantic.authenticated_dehyphenations`) — a
+    forged record (wrong stage / ``permitted_by`` / participant sequence, cross-carrier
+    lineage, a conflicting twin) never reaches here and so can never suppress a genuine
+    missing-content defect."""
     pairs: list[tuple[str, str]] = []
-    for t in semantic.segment_transforms:
+    for t in transforms:
         if t.kind != "dehyphenate" or not t.segment_ids:
             continue
         right_id = t.joined_with or t.segment_ids[-1]
@@ -249,7 +258,12 @@ def run_deterministic_checks(
     by_id = {s.segment_id: s for s in ced.accepted_segments}
     page_source = _resolve_source_text(ced, candidates, source_page_text)
     excluded_ids = _excluded_segment_ids(semantic)
-    dehyphen_pairs = _dehyphenation_pairs(semantic, by_id)
+    # Only ``dehyphenate`` records that satisfy the frozen T066–T074 semantic lineage
+    # contract against the real carriers / CED literals may account for a joined
+    # line-boundary surface — a forged record must not suppress a coverage or
+    # reading-order defect (R2/R3).
+    authentic_dehyphenations = authenticated_dehyphenations(semantic, ced)
+    dehyphen_pairs = _dehyphenation_pairs(authentic_dehyphenations, by_id)
     author_md = _author_visible(markdown)
 
     # -- coverage + gross divergence (runs first; before any LLM probe upstream) --
@@ -288,7 +302,9 @@ def run_deterministic_checks(
     # -- structural checks (always run, even under gross divergence) --
     _table_checks(markdown, semantic, ced, emitter)
     if not gross:
-        _reading_order_check(markdown, semantic, ced, excluded_ids, emitter)
+        _reading_order_check(
+            markdown, semantic, ced, excluded_ids, authentic_dehyphenations, emitter
+        )
     _ocr_confidence_check(ced, candidates, ocr_confidence_threshold, emitter)
 
     return DeterministicResult(
@@ -465,14 +481,37 @@ def _digit_delta(a: str, b: str) -> int:
     )
 
 
-# --- table span geometry + duplicated header (research §25.2 / FR-020–FR-022) ------
+# --- table span geometry + cell integrity + duplicated header (§25.2 / FR-020–FR-022) --
 #
 # The rendered table is parsed into a placed-cell grid and compared **against the
 # already-authoritative** ``SemanticDocument`` ``LogicalTable`` — never reconstructed
 # independently from the PDF. A geometry disagreement (row / column count, ``th`` vs
-# ``td``, ``rowspan``, ``colspan``, a missing / extra cell) is a ``table_shape`` issue.
+# ``td``, ``rowspan``, ``colspan``, a missing / extra cell) is a ``table_shape`` issue;
+# a cell whose rendered text does not match the authoritative logical cell **at that
+# logical row / column** (a swapped, moved, or edited cell) is a ``literal_mismatch``.
 # A duplicated header is flagged **only** when the render repeats the header row more
 # often than the reconstructed table does.
+
+
+def _pipe_cell_unescape(s: str) -> str:
+    """Exact inverse of :func:`solari_converter.render.markdown._pipe_cell` — recover
+    the authored cell literal from its rendered pipe-cell form. ``<br>`` → newline,
+    then every ``\\x`` escape (``\\\\`` / ``\\|`` / ``\\``` `` / ``\\*`` / ``\\_``)
+    unwound by a single left-to-right pair scan, then the HTML entities (``&lt;`` /
+    ``&gt;`` before ``&amp;``). The renderer's escaping is injective, so this never
+    conflates two materially different authored cells."""
+    s = s.replace("<br>", "\n")
+    out: list[str] = []
+    i = 0
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s):
+            out.append(s[i + 1])
+            i += 2
+            continue
+        out.append(s[i])
+        i += 1
+    s = "".join(out)
+    return s.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 
 @dataclass(frozen=True)
@@ -480,7 +519,9 @@ class _PCell:
     tag: str            # "th" | "td"
     rowspan: int
     colspan: int
-    text: str           # NFC-casefold-stripped; rendered-space escaping left intact
+    text: str           # NFC-casefold-stripped; loose, header-repeat heuristic only
+    body: str           # authored literal recovered via the renderer's exact escaping
+    #                     contract (NFC, case-sensitive) — the cell-integrity comparand
 
 
 @dataclass(frozen=True)
@@ -494,12 +535,15 @@ class _ParsedTable:
         return max((sum(c.colspan for c in r) for r in self.rows), default=0)
 
 
-def _ecell(cell: TableCell) -> _PCell:
+def _ecell(cell: TableCell, *, pipe: bool) -> _PCell:
+    body = _norm(cell.text)
     return _PCell(
         "th" if cell.is_header else "td",
         max(1, cell.rowspan),
         max(1, cell.colspan),
         _cnorm(cell.text),
+        # a Markdown pipe cell is whitespace-trimmed by the reader; an HTML cell is not
+        body.strip() if pipe else body,
     )
 
 
@@ -571,7 +615,10 @@ def _check_one_table(
     if exp is None:
         return  # a spurious extra table — the table-count issue already reports it
 
-    exp_rows = [tuple(_ecell(c) for c in row) for row in exp.table.rows]
+    pipe = not exp.table.has_merged_cells
+    exp_rows = [
+        tuple(_ecell(c, pipe=pipe) for c in row) for row in exp.table.rows
+    ]
 
     # --- R6: duplicated header (compare repeat counts, never "data row == header") --
     rendered_hdr = (
@@ -624,6 +671,23 @@ def _check_one_table(
             )
             continue
         for c, (rc, ec) in enumerate(zip(rrow, erow, strict=True)):
+            # R5: the rendered cell text must equal the authoritative logical cell at
+            # this logical row / column — accounting only for the renderer's own
+            # escaping / whitespace-trim contract. A swapped, moved, or edited cell
+            # fails here even when every tag / span count is unchanged.
+            if rc.body != ec.body:
+                emitter.add(
+                    severity="error", source_page=page, markdown_line=line,
+                    markdown_column=1, issue_type="literal_mismatch",
+                    description=(
+                        f"the table at Markdown line {line}, row {r}, column {c} "
+                        f"renders cell text {rc.body!r}; the reconstructed table cell "
+                        f"at that logical position is {ec.body!r} — a swapped, moved, "
+                        "or altered table cell (FR-020/SC-025)"
+                    ),
+                    expected=ec.body,
+                    found=rc.body,
+                )
             diffs: list[str] = []
             if rc.tag != ec.tag:
                 diffs.append(f"cell tag <{rc.tag}> vs <{ec.tag}>")
@@ -681,10 +745,7 @@ def _parse_tables(markdown: str) -> list[_ParsedTable]:
                 rows_text.append(_split_pipe(lines[i].strip()))
                 i += 1
             prows = tuple(
-                tuple(
-                    _PCell("th" if ri == 0 else "td", 1, 1, _cnorm(cell))
-                    for cell in row
-                )
+                tuple(_pipe_pcell(raw, ri) for raw in row)
                 for ri, row in enumerate(rows_text)
             )
             out.append(_ParsedTable(prows, start, "pipe"))
@@ -716,9 +777,23 @@ def _is_separator_row(line: str) -> bool:
 
 
 def _split_pipe(line: str) -> tuple[str, ...]:
+    """Split a pipe row into its raw (still renderer-escaped) cell payloads, trimming
+    only the renderer's own ``" | "`` padding. Unescaping is deferred to
+    :func:`_pipe_pcell` / :func:`_pipe_cell_unescape` so the faithful cell literal can
+    be recovered exactly."""
     inner = line.strip().strip("|")
     cells = _PIPE_SPLIT_RE.split(inner)
-    return tuple(c.strip().replace("\\|", "|").replace("\\\\", "\\") for c in cells)
+    return tuple(c.strip() for c in cells)
+
+
+def _pipe_pcell(raw: str, row_index: int) -> _PCell:
+    plain = _pipe_cell_unescape(raw)
+    return _PCell(
+        "th" if row_index == 0 else "td",
+        1, 1,
+        _cnorm(plain),
+        _norm(plain).strip(),
+    )
 
 
 def _parse_html_table(block: list[str], line: int) -> _ParsedTable:
@@ -729,12 +804,14 @@ def _parse_html_table(block: list[str], line: int) -> _ParsedTable:
         for tag, attrs, content in _CELL_RE.findall(tr):
             rs = _ROWSPAN_RE.search(attrs)
             cs = _COLSPAN_RE.search(attrs)
+            plain = _html_unescape(content)
             cells.append(
                 _PCell(
                     tag.lower(),
                     int(rs.group(1)) if rs else 1,
                     int(cs.group(1)) if cs else 1,
-                    _cnorm(_html_unescape(content)),
+                    _cnorm(plain),
+                    _norm(plain),
                 )
             )
         rows.append(tuple(cells))
@@ -758,6 +835,7 @@ def _reading_order_check(
     semantic: SemanticDocument,
     ced: CanonicalExtractedDocument,
     excluded_ids: frozenset[str],
+    authentic_dehyphenations: Sequence[SegmentTransform],
     emitter: _Emitter,
 ) -> None:
     by_id = {s.segment_id: s for s in ced.accepted_segments}
@@ -765,10 +843,11 @@ def _reading_order_check(
 
     # A segment with no independent rendered occurrence must not be localised /
     # ordered: a removed or collapsed segment, an identical-evidence table sibling, or
-    # a source surface a recorded ``dehyphenate`` transform merged away. The frozen
-    # heuristic restriction (uniquely localisable literal, length ≥ 8) is unchanged.
+    # a source surface an **authenticated** ``dehyphenate`` transform merged away (a
+    # forged record does not earn this exemption — R3). The frozen heuristic
+    # restriction (uniquely localisable literal, length ≥ 8) is unchanged.
     skip = set(excluded_ids)
-    for t in semantic.segment_transforms:
+    for t in authentic_dehyphenations:
         if t.kind == "dehyphenate":
             skip.update(t.segment_ids)
 

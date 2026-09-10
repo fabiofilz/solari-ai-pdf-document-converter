@@ -220,11 +220,18 @@ def _render_html_table(rows: list[list[TableCell]]) -> str:
 
 def _pipe_cell(text: str) -> str:
     """A pipe-table cell value (research §25.2 ``markdown_escape``): backslash first,
-    then the structural pipe, then the inline emphasis / code triggers a cell still
-    parses (`` ` ``, ``*``, ``_``), then a hard line break folded to ``<br>`` (a literal
-    newline would break the table row). No numeric / separator normalisation (FR-020)."""
+    then the HTML-significant characters as entities (``&`` before ``<``/``>`` so a
+    literal ``&lt;`` is not double-encoded — authored ``<b>x</b> & y`` must never become
+    active HTML), then the structural pipe, then the inline emphasis / code triggers a
+    cell still parses (`` ` ``, ``*``, ``_``), then a hard line break folded to ``<br>``
+    (a literal newline would break the table row; it is emitted *after* the ``<`` / ``>``
+    pass so the renderer's own ``<br>`` is not re-encoded). No numeric / separator
+    normalisation (FR-020)."""
     return (
         text.replace("\\", "\\\\")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
         .replace("|", "\\|")
         .replace("`", "\\`")
         .replace("*", "\\*")

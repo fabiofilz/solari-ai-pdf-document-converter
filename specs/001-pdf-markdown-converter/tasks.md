@@ -398,6 +398,42 @@ future-owner REDs; 0 unexpected). Byte/`PYTHONHASHSEED` determinism re-verified.
   cell/​block provenance (`TableCell.page`, then provenance→`SourceRef.physical_page`,
   min); deterministic `1` fallback only when no provenance resolves.
 
+**2026-09-10 T075–T078 independent-gate remediation** (independent Codex final gate on
+checkpoint `92ada60`; three reproduced HIGH findings only — narrow pass, **no T075+
+work started**, no task renumbered/removed, every T079–T161 stays `[ ]`; no committed
+schema touched, no dependency change, frozen T066–T074 production behaviour untouched,
+no RenderMap/T145, no LLM/network). Three files: `render/markdown.py` (T076),
+`transform/build_semantic.py` (additive helper only), `validate/deterministic.py`
+(T078); adversarial regression in `tests/unit/test_render_selfcheck_gate.py` (31 tests).
+Baseline `903 passed / 21 failed` → `934 passed / 21 failed` (same 21 future-owner REDs;
+0 unexpected). Byte/`PYTHONHASHSEED` (0/1/7/999) determinism re-verified.
+- **HIGH 1 / R1** `render/markdown.py` `_pipe_cell` — a pipe-table cell now also
+  neutralises authored `&` / `<` / `>` as HTML entities (`&` first so a literal `&lt;`
+  is not double-encoded), emitted before the `<br>` newline fold so the renderer's own
+  `<br>` is not re-encoded. Existing backslash / `|` / `` ` `` / `*` / `_` / multiline
+  escaping unchanged; HTML-table path (which intentionally generates markup) unchanged.
+  The escaping stays an exact, invertible, byte-stable contract.
+- **HIGH 2 / R2+R3** `validate/deterministic.py` — coverage (`_dehyphenation_pairs`)
+  and reading-order (`_reading_order_check`) now trust a `dehyphenate` record only when
+  `transform.build_semantic.authenticated_dehyphenations(semantic, ced)` accepts it. The
+  new helper reuses the frozen `_dehyphenate_participants` / conflict rules verbatim:
+  `kind`/`permitted_by`/`stage`, unique participant ids, `segment_ids[-1] == joined_with`,
+  exactly one hosting carrier whose ordered provenance prefix through the joined-right
+  segment equals `segment_ids` (adjacency, order, no unrelated/reordered/cross-carrier
+  ids), left literal ends `U+002D`, no conflicting twin on the same `joined_with` /
+  boundary. Forged records (wrong stage / `permitted_by`, unknown / unrelated /
+  reordered / duplicated ids, forged `joined_with`, cross-carrier lineage, conflicting
+  duplicates) can no longer suppress a missing-content or reading-order defect; a
+  genuine producer-compatible join still passes.
+- **HIGH 3 / R5** `validate/deterministic.py` `_parse_tables` / `_parse_html_table` /
+  `_check_one_table` — beyond span geometry, each rendered cell's **text** is compared,
+  at its **logical row/column**, to the authoritative `LogicalTable` cell. The comparand
+  is the authored literal recovered through the renderer's exact escaping contract
+  (`_pipe_cell_unescape` / `_html_unescape`, NFC, case-sensitive, pipe cells
+  whitespace-trimmed) — no lossy inverse. A swapped, moved, or edited cell →
+  `literal_mismatch`; a missing/extra cell or wrong `rowspan`/`colspan` → `table_shape`;
+  a faithful render (spanned tables, escaped `<`/`>`/`&`, multiline HTML cells) passes.
+
 - [x] T075 [P] [US1] Write failing unit test **first** `tests/unit/test_render_markdown.py` (M3) — `#`×level for 1–6; deep level >6 → emphasized lead-in + `[L{n}]` marker; a table with no merged cells → pipe table; with merged cells → HTML `<table>` with exact `rowspan`/`colspan`; OCR-derived span carries the OCR marker; output is UTF-8, **binary-written, no BOM, LF only, no NFC/NFD**, and deterministic for a fixed `SemanticDocument` — **DONE 2026-09-10 (4E)**: 18 tests. RED-before-GREEN (module absent). Block-level `OCR_BLOCK_MARKER` (`<!-- ocr-derived -->`, envelope per §25.2) before a block all of whose provenance is OCR-derived; deep-heading form `*text* [L{n}]`; pipe-cell `\|`/`\\` escaping; HTML `<table>` with `rowspan` before `colspan`, `<th>` for the header row; NFD input round-trips unchanged; identical bytes across repeated calls and across set/list ordering of `ocr_segment_ids`.
 - [x] T076 [US1] Create `src/solari_converter/render/markdown.py` — `SemanticDocument` → UTF-8 Markdown per T075 (FR-012/FR-016/FR-017a/FR-020) using `artifacts_io`'s binary serialization helper (T027); the `RenderMap` emission is added by T145 — makes T075 pass (depends on T073; tests T075) — **DONE 2026-09-10 (4E)**: `render_markdown(doc, *, ocr_segment_ids=()) -> str` + `render_markdown_bytes(...) -> bytes` (via `artifacts_io.markdown_bytes` — LF only, no BOM, no NFC/NFD). Pure deterministic projection of the frozen `SemanticDocument`: blocks emitted **in `doc.blocks` order, never re-sorted** (`structural_reorder` was applied upstream); `#`×level 1–6 / `*text* [L{n}]` >6; paragraph & clause text verbatim (clause identifier retained); list items verbatim, `LIST_INDENT` (2 sp) × depth; pipe table when `not has_merged_cells` else HTML `<table>` with exact geometry-derived `rowspan`/`colspan`; `markdown_escape` (pipe cell `\|`/`\\`, newline→`<br>`) and `html_escape` (`&`/`<`/`>`, newline→`<br>`) — no numeric/separator normalisation. No RenderMap, no `segment_transforms` emission (T145). No LLM/network/PDF. Ruff clean.
 - [x] T077 [P] [US1] Write failing unit test **first** `tests/unit/test_validate_deterministic.py` (M3, Constitution VI — validation logic) — source-text **coverage** (SC-001) against candidates + PDF returns the expected fraction and lists the missing tokens; a seeded numeric change → a `numeric_mismatch` issue; a broken table shape → `table_shape`; a duplicated header row → `duplicated_header`; a re-ordered segment vs the accepted order → `reading_order`; an OCR span below the normalized threshold → `ocr_low_confidence`; the **gross-divergence match-rate** on an unrelated Markdown → below-threshold, and the check runs **before** any LLM probe; every emitted issue is `check_origin: "deterministic"` and the whole pass is byte-reproducible for a fixed input — **DONE 2026-09-10 (4E)**: 17 tests. RED-before-GREEN (module absent). Covers coverage fraction + missing-token list, **logged stage-3 removal not counted as missing coverage**, seeded numeric change → `numeric_mismatch` (expected/found), intact monetary value → no issue, broken/matching table shape, duplicated header row, unlogged reading-order inversion (+ no false positive in accepted order), OCR segment below/at threshold, unrelated-Markdown gross divergence (per-token noise suppressed, structural issues still listed), `check_origin=="deterministic"` on every issue, and a 5×-repeat byte-reproducibility snapshot. Static assert: the module imports no LLM client/symbol.

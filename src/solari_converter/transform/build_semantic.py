@@ -58,6 +58,7 @@ __all__ = [
     "build_semantic",
     "literal_accounting_violations",
     "accepted_partition_violations",
+    "authenticated_dehyphenations",
     "LiteralAccountingError",
     "AcceptedPartitionError",
 ]
@@ -570,6 +571,81 @@ def _malformed_dehyphenate(
     if not ced_text.get(left, "").endswith(_HYPHEN):
         return {left} & set(ced_text)
     return set()
+
+
+def authenticated_dehyphenations(
+    semantic: SemanticDocument, ced: CanonicalExtractedDocument
+) -> tuple[SegmentTransform, ...]:
+    """The subset of ``semantic.segment_transforms`` that are ``dehyphenate`` records
+    satisfying the **frozen** Stage-3 lineage contract (T066–T074 / B2) against the
+    actual semantic carriers and the CED literals — the only records a downstream
+    consumer (the Stage-4 self-check) may trust to account for a joined line-boundary
+    surface.
+
+    A record is authenticated only when **every** frozen field holds — the same checks
+    :func:`_dehyphenate_participants` and :func:`_malformed_dehyphenate` enforce inside
+    :func:`literal_accounting_violations`, reused here verbatim (no weaker duplicate
+    contract):
+
+    * ``kind == "dehyphenate"``, ``permitted_by == "FR-014"``, ``stage == 3``;
+    * ``segment_ids`` has ≥ 2 entries, all unique, ``segment_ids[-1] == joined_with``;
+    * exactly **one** semantic carrier (prose / heading / clause / list item / table
+      cell — never the outer table block) has ordered provenance whose prefix through
+      the joined-right segment is *exactly* ``segment_ids`` (adjacency, source order,
+      no unrelated / reordered / duplicated / cross-carrier participant ids);
+    * the left participant's stored CED literal ends in ``U+002D``;
+    * no other ``dehyphenate`` record shares this record's ``joined_with`` or its
+      ``(left, right)`` boundary (no conflicting duplicate transforms).
+
+    Deterministic; order-preserving. A forged record (``permitted_by="FR-999"``,
+    ``stage=99``, unknown / unrelated / reordered ids, a cross-carrier or duplicated
+    participant sequence, a forged ``joined_with``, or a conflicting twin) is absent
+    from the result.
+    """
+    ced_text = _ced_literals(ced)
+    carriers = [
+        tuple(prov)
+        for b in semantic.blocks
+        for _text, prov in _carrier_units(b)
+        if prov
+    ]
+    deh = [t for t in semantic.segment_transforms if t.kind == "dehyphenate"]
+
+    joined_counts: dict[str, int] = {}
+    boundary_counts: dict[tuple[str, str], int] = {}
+    for t in deh:
+        sids = tuple(t.segment_ids or ())
+        if t.joined_with:
+            joined_counts[t.joined_with] = joined_counts.get(t.joined_with, 0) + 1
+        if len(sids) >= 2:
+            key = (sids[-2], sids[-1])
+            boundary_counts[key] = boundary_counts.get(key, 0) + 1
+
+    out: list[SegmentTransform] = []
+    for t in deh:
+        sids = tuple(t.segment_ids or ())
+        # frozen conflict rule (no duplicate transform for the same joined boundary)
+        if t.joined_with and joined_counts.get(t.joined_with, 0) > 1:
+            continue
+        if len(sids) >= 2 and boundary_counts.get((sids[-2], sids[-1]), 0) > 1:
+            continue
+        # exactly one hosting carrier, each validated by the frozen per-carrier contract
+        hosts = [
+            prov
+            for prov in carriers
+            if _dehyphenate_participants(t, prov, ced_text) is not None
+        ]
+        if len(hosts) != 1:
+            continue
+        host = hosts[0]
+        v = _dehyphenate_participants(t, host, ced_text)
+        if v is None:
+            continue
+        left_id, right_id = v
+        if left_id != host[host.index(right_id) - 1]:
+            continue
+        out.append(t)
+    return tuple(out)
 
 
 def _anchor(block: Block, accepted_index: dict[str, int]) -> int:
