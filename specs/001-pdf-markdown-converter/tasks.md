@@ -356,6 +356,48 @@ dependency change, no extraction/reconciliation/LLM change):
 
 ### 4E — Render + deterministic self-check (Human Review core prerequisites)
 
+**2026-09-10 T075–T078 post-implementation remediation** (independent re-audit of
+checkpoint `cac0a73`; eight reproduced findings R1–R8 only — narrow pass, **no T075+
+work started**, no task renumbered/removed, every T079–T161 stays `[ ]`; no committed
+schema touched, no dependency change, frozen T066–T074 untouched, no RenderMap/T145, no
+LLM/network). Two files: `render/markdown.py` (T076) + `validate/deterministic.py`
+(T078); adversarial regression in `tests/unit/test_render_selfcheck_remediation.py`
+(41 tests). Baseline `862 passed / 21 failed` → `903 passed / 21 failed` (same 21
+future-owner REDs; 0 unexpected). Byte/`PYTHONHASHSEED` determinism re-verified.
+- **R1** `render/markdown.py` — context-aware Stage-5 `markdown_escape` (§25.2): per
+  context (paragraph / heading / deep-heading envelope / clause / list-item body /
+  pipe cell) author literals containing `# > * _ \` \\ | < > &` and embedded newlines
+  render verbatim (`\#`, `&gt;`, `\*`, `<br>`, HTML entities); renderer-generated
+  structure (`#` marker, `*…* [L{n}]` envelope, list indent, table pipes, `<td>`) is
+  never escaped. HTML-cell path unchanged (Markdown inert in an HTML block).
+- **R2** `_coverage` — transformation-aware: expectation excludes `removed_segment_ids`,
+  `collapsed_segment_ids`, non-representative `table_identical_evidence_groups`
+  siblings, and recorded `dehyphenate` source surfaces (`inter-`+`national` folded to
+  `international` before token matching); genuinely dropped transformed content still
+  flagged.
+- **R3** `_reading_order_check` — same lineage exclusions (removed / collapsed /
+  identical-evidence sibling / dehyphenate participant) skipped from localisation so a
+  retained identical twin can't drive a false inversion; frozen heuristic (unique
+  literal, ≥ 8 chars) and `structural_reorder` gating unchanged.
+- **R4** `_numbers` / `_numeric_checks` — numeric literal keeps leading `+`/`-`,
+  trailing `%`, authored separators, leading zeros (`-25`≠`25`, `25%`≠`25`, `1.00`≠`1`,
+  `0004`≠`4`, `1.599,80`≠`1,599.80`; no locale normalisation). Envelope isolation:
+  `<…>` tags/comments and `[L{n}]` stripped before author-number matching so
+  `rowspan="2"` / `colspan="3"` / `[L7]` can't satisfy an authored number; excluded
+  segments' numbers not expected.
+- **R5** `_parse_html_table` / `_check_one_table` — full placed-cell span geometry
+  compared to the authoritative `LogicalTable`: row/column count, `th`/`td`, `rowspan`,
+  `colspan`, missing/extra cell → `table_shape`. Geometry never re-derived from the PDF.
+- **R6** `_check_one_table` — duplicated header flagged only when the render repeats the
+  header row **more often** than the reconstructed table does; an author data row equal
+  to the header (or several) is accepted.
+- **R7** `_ocr_confidence_check` — candidate `confidence_threshold` uses the explicit
+  value whenever not `None` (an explicit `0` is honoured), frozen default only when
+  absent — no `or` truthiness fallback.
+- **R8** table `ValidationIssue.source_page` — derived from the reconstructed table's
+  cell/​block provenance (`TableCell.page`, then provenance→`SourceRef.physical_page`,
+  min); deterministic `1` fallback only when no provenance resolves.
+
 - [x] T075 [P] [US1] Write failing unit test **first** `tests/unit/test_render_markdown.py` (M3) — `#`×level for 1–6; deep level >6 → emphasized lead-in + `[L{n}]` marker; a table with no merged cells → pipe table; with merged cells → HTML `<table>` with exact `rowspan`/`colspan`; OCR-derived span carries the OCR marker; output is UTF-8, **binary-written, no BOM, LF only, no NFC/NFD**, and deterministic for a fixed `SemanticDocument` — **DONE 2026-09-10 (4E)**: 18 tests. RED-before-GREEN (module absent). Block-level `OCR_BLOCK_MARKER` (`<!-- ocr-derived -->`, envelope per §25.2) before a block all of whose provenance is OCR-derived; deep-heading form `*text* [L{n}]`; pipe-cell `\|`/`\\` escaping; HTML `<table>` with `rowspan` before `colspan`, `<th>` for the header row; NFD input round-trips unchanged; identical bytes across repeated calls and across set/list ordering of `ocr_segment_ids`.
 - [x] T076 [US1] Create `src/solari_converter/render/markdown.py` — `SemanticDocument` → UTF-8 Markdown per T075 (FR-012/FR-016/FR-017a/FR-020) using `artifacts_io`'s binary serialization helper (T027); the `RenderMap` emission is added by T145 — makes T075 pass (depends on T073; tests T075) — **DONE 2026-09-10 (4E)**: `render_markdown(doc, *, ocr_segment_ids=()) -> str` + `render_markdown_bytes(...) -> bytes` (via `artifacts_io.markdown_bytes` — LF only, no BOM, no NFC/NFD). Pure deterministic projection of the frozen `SemanticDocument`: blocks emitted **in `doc.blocks` order, never re-sorted** (`structural_reorder` was applied upstream); `#`×level 1–6 / `*text* [L{n}]` >6; paragraph & clause text verbatim (clause identifier retained); list items verbatim, `LIST_INDENT` (2 sp) × depth; pipe table when `not has_merged_cells` else HTML `<table>` with exact geometry-derived `rowspan`/`colspan`; `markdown_escape` (pipe cell `\|`/`\\`, newline→`<br>`) and `html_escape` (`&`/`<`/`>`, newline→`<br>`) — no numeric/separator normalisation. No RenderMap, no `segment_transforms` emission (T145). No LLM/network/PDF. Ruff clean.
 - [x] T077 [P] [US1] Write failing unit test **first** `tests/unit/test_validate_deterministic.py` (M3, Constitution VI — validation logic) — source-text **coverage** (SC-001) against candidates + PDF returns the expected fraction and lists the missing tokens; a seeded numeric change → a `numeric_mismatch` issue; a broken table shape → `table_shape`; a duplicated header row → `duplicated_header`; a re-ordered segment vs the accepted order → `reading_order`; an OCR span below the normalized threshold → `ocr_low_confidence`; the **gross-divergence match-rate** on an unrelated Markdown → below-threshold, and the check runs **before** any LLM probe; every emitted issue is `check_origin: "deterministic"` and the whole pass is byte-reproducible for a fixed input — **DONE 2026-09-10 (4E)**: 17 tests. RED-before-GREEN (module absent). Covers coverage fraction + missing-token list, **logged stage-3 removal not counted as missing coverage**, seeded numeric change → `numeric_mismatch` (expected/found), intact monetary value → no issue, broken/matching table shape, duplicated header row, unlogged reading-order inversion (+ no false positive in accepted order), OCR segment below/at threshold, unrelated-Markdown gross divergence (per-token noise suppressed, structural issues still listed), `check_origin=="deterministic"` on every issue, and a 5×-repeat byte-reproducibility snapshot. Static assert: the module imports no LLM client/symbol.

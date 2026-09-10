@@ -44,9 +44,12 @@ from dataclasses import dataclass
 from typing import Literal
 
 from solari_converter.model.candidate import ExtractionCandidate
-from solari_converter.model.canonical import CanonicalExtractedDocument
+from solari_converter.model.canonical import (
+    AcceptedSegment,
+    CanonicalExtractedDocument,
+)
 from solari_converter.model.semantic import SemanticDocument
-from solari_converter.transform.tables import TableBlock
+from solari_converter.transform.tables import TableBlock, TableCell
 
 __all__ = [
     "GROSS_DIVERGENCE_DEFAULT",
@@ -68,7 +71,14 @@ OCR_CONFIDENCE_DEFAULT: float = 70.0
 MIN_LOCALISABLE_CHARS: int = 8
 
 _WORD_OR_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*|[^\W\d_]+", re.UNICODE)
-_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
+#: An authored numeric literal keeps its **surface semantics** (research §15 / FR-024):
+#: an attached leading ``+`` / ``-`` sign, a trailing ``%``, the decimal / group
+#: separators exactly as authored, and any leading zeros. ``-25`` ≠ ``25``; ``25%`` ≠
+#: ``25``; ``1.00`` ≠ ``1``; ``0004`` ≠ ``4``; ``1.599,80`` ≠ ``1,599.80``. Locale forms
+#: are **never** normalised to a common value — they are compared as literal strings.
+#: The leading-boundary guard keeps a hyphen that is really a dash / range separator
+#: (``10-25``) from being read as a sign.
+_NUMBER_RE = re.compile(r"(?<![\w.])([+-]?\d+(?:[.,]\d+)*%?)")
 _PIPE_SPLIT_RE = re.compile(r"(?<!\\)\|")
 _SEPARATOR_CELL_RE = re.compile(r"^:?-{1,}:?$")
 _TR_RE = re.compile(r"<tr>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
@@ -76,6 +86,15 @@ _CELL_RE = re.compile(
     r"<(t[hd])((?:\s+[a-z]+=\"[^\"]*\")*)\s*>(.*?)</\1>", re.IGNORECASE | re.DOTALL
 )
 _COLSPAN_RE = re.compile(r'colspan="(\d+)"', re.IGNORECASE)
+_ROWSPAN_RE = re.compile(r'rowspan="(\d+)"', re.IGNORECASE)
+
+#: Markdown / HTML structure the renderer generates itself — never authored content.
+#: Stripped before any authored-token / authored-number matching so a generated number
+#: (``rowspan="2"``, ``colspan="3"``, a deep-heading ``[L7]`` envelope, an OCR comment,
+#: a pipe separator row) can never stand in for missing author content (research §25.2).
+_MD_ENVELOPE_RE = re.compile(r"<[^>]*>|\[L\d+\]")
+_TRAILING_HYPHEN_FRAG_RE = re.compile(r"([^\W\d_]+)-\Z", re.UNICODE)
+_LEADING_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
 
 
 # --- public value types ----------------------------------------------------------
@@ -131,6 +150,75 @@ def _numbers(text: str) -> list[str]:
     return _NUMBER_RE.findall(_norm(text))
 
 
+def _author_visible(markdown: str) -> str:
+    """``markdown`` with the renderer's own generated structure removed (HTML tags /
+    comments, deep-heading ``[L{n}]`` envelopes). What remains is the author-visible
+    text — the only thing an authored token / number is allowed to match against."""
+    return _MD_ENVELOPE_RE.sub(" ", markdown)
+
+
+def _cnorm(text: str) -> str:
+    return _norm(text).casefold().strip()
+
+
+def _excluded_segment_ids(semantic: SemanticDocument) -> frozenset[str]:
+    """Accepted source segments whose literal is **not** expected to appear directly in
+    the delivered Markdown, because a recorded, permitted Stage-3 operation already
+    accounts for it (research §25.2):
+
+    * ``removed_segment_ids`` — a logged artifact removal (page number / furniture);
+    * ``collapsed_segment_ids`` — a repeated table header folded into its retained twin
+      (FR-021 / FR-022);
+    * every non-representative sibling of a ``table_identical_evidence_groups`` set — two
+      or more byte-identical source literals T070 collapsed into one retained logical
+      cell; only the lexicographically-smallest id is the rendered representative.
+    """
+    out: set[str] = set(semantic.removed_segment_ids) | set(
+        semantic.collapsed_segment_ids
+    )
+    for group in semantic.table_identical_evidence_groups:
+        siblings = sorted(group)
+        out.update(siblings[1:])
+    return frozenset(out)
+
+
+def _dehyphenation_pairs(
+    semantic: SemanticDocument, by_id: Mapping[str, AcceptedSegment]
+) -> list[tuple[str, str]]:
+    """``(left_fragment, right_fragment)`` for every recorded ``dehyphenate`` transform
+    (FR-014) — the trailing word fragment before the joined ``U+002D`` and the leading
+    word of the following segment. After the join neither surface appears literally; the
+    merged token ``left+right`` does. Used to reconcile source-token expectations so a
+    legitimate ``inter-`` + ``national`` → ``international`` is not a false divergence."""
+    pairs: list[tuple[str, str]] = []
+    for t in semantic.segment_transforms:
+        if t.kind != "dehyphenate" or not t.segment_ids:
+            continue
+        right_id = t.joined_with or t.segment_ids[-1]
+        left_ids = [s for s in t.segment_ids if s != right_id]
+        if not left_ids:
+            continue
+        left = by_id.get(left_ids[-1])
+        right = by_id.get(right_id)
+        if left is None or right is None:
+            continue
+        lm = _TRAILING_HYPHEN_FRAG_RE.search(_norm(left.text).rstrip())
+        rm = _LEADING_WORD_RE.search(_norm(right.text))
+        if lm is None or rm is None:
+            continue
+        pairs.append((lm.group(1), rm.group(0)))
+    return pairs
+
+
+def _apply_dehyphenation(text: str, pairs: list[tuple[str, str]]) -> str:
+    """Fold each recorded ``left-`` + ``right`` back into ``leftright`` in ``text`` so
+    the two original token surfaces are not counted as missing source content."""
+    for left, right in pairs:
+        pat = re.compile(re.escape(left) + r"-\s*" + re.escape(right))
+        text = pat.sub(left + right, text, count=1)
+    return text
+
+
 def _line_col(text: str, offset: int) -> tuple[int, int]:
     """1-based (line, codepoint-column) of ``offset`` into ``text``."""
     if offset <= 0:
@@ -158,10 +246,16 @@ def run_deterministic_checks(
     the source-text match rate. Deterministic and side-effect free."""
     emitter = _Emitter()
 
+    by_id = {s.segment_id: s for s in ced.accepted_segments}
     page_source = _resolve_source_text(ced, candidates, source_page_text)
+    excluded_ids = _excluded_segment_ids(semantic)
+    dehyphen_pairs = _dehyphenation_pairs(semantic, by_id)
+    author_md = _author_visible(markdown)
 
     # -- coverage + gross divergence (runs first; before any LLM probe upstream) --
-    match_rate, missing, missing_by_page = _coverage(markdown, semantic, ced, page_source)
+    match_rate, missing, missing_by_page = _coverage(
+        author_md, semantic, ced, page_source, excluded_ids, dehyphen_pairs
+    )
     gross = bool(page_source) and match_rate < gross_divergence_threshold
 
     if gross:
@@ -189,12 +283,12 @@ def run_deterministic_checks(
                 ),
                 expected=", ".join(toks),
             )
-        _numeric_checks(markdown, page_source, emitter)
+        _numeric_checks(author_md, page_source, ced, excluded_ids, emitter)
 
     # -- structural checks (always run, even under gross divergence) --
-    _table_checks(markdown, semantic, emitter)
+    _table_checks(markdown, semantic, ced, emitter)
     if not gross:
-        _reading_order_check(markdown, semantic, ced, emitter)
+        _reading_order_check(markdown, semantic, ced, excluded_ids, emitter)
     _ocr_confidence_check(ced, candidates, ocr_confidence_threshold, emitter)
 
     return DeterministicResult(
@@ -257,29 +351,38 @@ def _resolve_source_text(
 
 
 def _coverage(
-    markdown: str,
+    author_md: str,
     semantic: SemanticDocument,
     ced: CanonicalExtractedDocument,
     page_source: Mapping[int, str],
+    excluded_ids: frozenset[str],
+    dehyphen_pairs: list[tuple[str, str]],
 ) -> tuple[float, list[str], dict[int, list[str]]]:
-    removed = Counter(
+    """Source-text coverage over the **delivered semantic expectations** (research
+    §25.2): every accepted source token is expected in the Markdown *except* those an
+    excluded segment owns (removed / collapsed / identical-evidence sibling) and those a
+    recorded ``dehyphenate`` transform merged away. The self-check does not re-prove
+    semantic fidelity (T066–T074 do) — it checks the render represents the already-
+    verified ``SemanticDocument``."""
+    excluded = Counter(
         tok
         for s in ced.accepted_segments
-        if s.segment_id in semantic.removed_segment_ids
+        if s.segment_id in excluded_ids
         for tok in _tokens(s.text)
     )
-    md_bag = Counter(_tokens(markdown))
+    md_bag = Counter(_tokens(author_md))
 
     total = 0
     matched = 0
     missing_by_page: dict[int, list[str]] = {}
     available = md_bag.copy()
-    removed_left = removed.copy()
+    removed_left = excluded.copy()
 
     for page in sorted(page_source):
-        for tok in _tokens(page_source[page]):
+        source_text = _apply_dehyphenation(page_source[page], dehyphen_pairs)
+        for tok in _tokens(source_text):
             if removed_left.get(tok, 0) > 0:
-                removed_left[tok] -= 1  # a logged stage-3 removal — not expected present
+                removed_left[tok] -= 1  # accounted for by a recorded Stage-3 operation
                 continue
             total += 1
             if available.get(tok, 0) > 0:
@@ -297,15 +400,34 @@ def _coverage(
 
 
 def _numeric_checks(
-    markdown: str, page_source: Mapping[int, str], emitter: _Emitter
+    author_md: str,
+    page_source: Mapping[int, str],
+    ced: CanonicalExtractedDocument,
+    excluded_ids: frozenset[str],
+    emitter: _Emitter,
 ) -> None:
-    md_numbers = Counter(_numbers(markdown))
+    """A source numeric literal not reproduced verbatim in the author-visible Markdown
+    (research §15 / FR-024). Sign, ``%``, separators and leading zeros are all part of
+    the literal. Numbers the Markdown / HTML envelope generates (``rowspan="2"``,
+    ``[L7]``) are already stripped from ``author_md``; numbers owned by an excluded
+    segment (removed / collapsed / identical-evidence sibling) are not expected."""
+    md_numbers = Counter(_numbers(author_md))
     leftover_md = md_numbers.copy()
+
+    excluded_numbers = Counter(
+        num
+        for s in ced.accepted_segments
+        if s.segment_id in excluded_ids
+        for num in _numbers(s.text)
+    )
+    excluded_left = excluded_numbers.copy()
 
     unmatched: list[tuple[int, str]] = []
     for page in sorted(page_source):
         for num in _numbers(page_source[page]):
-            if leftover_md.get(num, 0) > 0:
+            if excluded_left.get(num, 0) > 0:
+                excluded_left[num] -= 1
+            elif leftover_md.get(num, 0) > 0:
                 leftover_md[num] -= 1
             else:
                 unmatched.append((page, num))
@@ -343,66 +465,206 @@ def _digit_delta(a: str, b: str) -> int:
     )
 
 
-# --- table shape + duplicated header --------------------------------------
+# --- table span geometry + duplicated header (research §25.2 / FR-020–FR-022) ------
+#
+# The rendered table is parsed into a placed-cell grid and compared **against the
+# already-authoritative** ``SemanticDocument`` ``LogicalTable`` — never reconstructed
+# independently from the PDF. A geometry disagreement (row / column count, ``th`` vs
+# ``td``, ``rowspan``, ``colspan``, a missing / extra cell) is a ``table_shape`` issue.
+# A duplicated header is flagged **only** when the render repeats the header row more
+# often than the reconstructed table does.
+
+
+@dataclass(frozen=True)
+class _PCell:
+    tag: str            # "th" | "td"
+    rowspan: int
+    colspan: int
+    text: str           # NFC-casefold-stripped; rendered-space escaping left intact
 
 
 @dataclass(frozen=True)
 class _ParsedTable:
-    rows: tuple[tuple[str, ...], ...]
-    ncols: int
+    rows: tuple[tuple[_PCell, ...], ...]
     line: int
+    kind: str           # "pipe" | "html"
+
+    @property
+    def ncols(self) -> int:
+        return max((sum(c.colspan for c in r) for r in self.rows), default=0)
 
 
-def _table_checks(markdown: str, semantic: SemanticDocument, emitter: _Emitter) -> None:
+def _ecell(cell: TableCell) -> _PCell:
+    return _PCell(
+        "th" if cell.is_header else "td",
+        max(1, cell.rowspan),
+        max(1, cell.colspan),
+        _cnorm(cell.text),
+    )
+
+
+def _table_source_page(tblock: TableBlock, by_id: Mapping[str, AcceptedSegment]) -> int:
+    """The first physical source page the reconstructed table draws on — from the
+    logical cells' provenance / recorded page, then the block provenance. Deterministic
+    fallback ``1`` only when no provenance is resolvable (research §25.8)."""
+    pages: list[int] = []
+    for row in tblock.table.rows:
+        for c in row:
+            if c.page is not None:
+                pages.append(c.page)
+            for sid in c.provenance:
+                seg = by_id.get(sid)
+                if seg is not None:
+                    pages.append(seg.source.physical_page)
+    for sid in tblock.provenance:
+        seg = by_id.get(sid)
+        if seg is not None:
+            pages.append(seg.source.physical_page)
+    return min(pages) if pages else 1
+
+
+def _tables_min_page(
+    expected: Sequence[TableBlock], by_id: Mapping[str, AcceptedSegment]
+) -> int:
+    pages = [_table_source_page(t, by_id) for t in expected]
+    return min(pages) if pages else 1
+
+
+def _table_checks(
+    markdown: str,
+    semantic: SemanticDocument,
+    ced: CanonicalExtractedDocument,
+    emitter: _Emitter,
+) -> None:
+    by_id = {s.segment_id: s for s in ced.accepted_segments}
     parsed = _parse_tables(markdown)
-    expected = [
-        b for b in semantic.blocks if isinstance(b, TableBlock)
-    ]
+    expected = [b for b in semantic.blocks if isinstance(b, TableBlock)]
+    fallback_page = _tables_min_page(expected, by_id)
 
     for i, tbl in enumerate(parsed):
-        norm = [tuple(c.casefold().strip() for c in r) for r in tbl.rows]
-        if norm and norm[0] in norm[1:]:
-            emitter.add(
-                severity="error", source_page=1,
-                markdown_line=tbl.line, markdown_column=1,
-                issue_type="duplicated_header",
-                description=(
-                    f"the header row of the table at Markdown line {tbl.line} is "
-                    "re-emitted as a data row (FR-022)"
-                ),
-                expected=" | ".join(tbl.rows[0]),
-            )
-        if i < len(expected):
-            exp_rows = len(expected[i].table.rows)
-            exp_cols = max(
-                (sum(c.colspan for c in row) for row in expected[i].table.rows),
-                default=0,
-            )
-            if (len(tbl.rows), tbl.ncols) != (exp_rows, exp_cols):
-                emitter.add(
-                    severity="error", source_page=1,
-                    markdown_line=tbl.line, markdown_column=1,
-                    issue_type="table_shape",
-                    description=(
-                        f"the delivered table at Markdown line {tbl.line} is "
-                        f"{len(tbl.rows)}×{tbl.ncols}; the reconstructed table is "
-                        f"{exp_rows}×{exp_cols} (FR-020/FR-021)"
-                    ),
-                    expected=f"{exp_rows}x{exp_cols}",
-                    found=f"{len(tbl.rows)}x{tbl.ncols}",
-                )
+        exp = expected[i] if i < len(expected) else None
+        page = _table_source_page(exp, by_id) if exp is not None else fallback_page
+        _check_one_table(tbl, exp, page, emitter)
 
     if len(parsed) != len(expected):
         emitter.add(
-            severity="error", source_page=1, markdown_line=1, markdown_column=1,
-            issue_type="table_shape",
+            severity="error", source_page=fallback_page, markdown_line=1,
+            markdown_column=1, issue_type="table_shape",
             description=(
-                f"the delivered Markdown has {len(parsed)} table(s); the "
-                f"reconstructed document has {len(expected)} (FR-020/FR-021)"
+                f"the delivered Markdown has {len(parsed)} table(s); the reconstructed "
+                f"document has {len(expected)} (FR-020/FR-021)"
             ),
             expected=str(len(expected)),
             found=str(len(parsed)),
         )
+
+
+def _row_text(row: Sequence[_PCell]) -> tuple[str, ...]:
+    return tuple(c.text for c in row)
+
+
+def _check_one_table(
+    tbl: _ParsedTable, exp: TableBlock | None, page: int, emitter: _Emitter
+) -> None:
+    line = tbl.line
+    rendered: list[tuple[_PCell, ...]] = list(tbl.rows)
+    if exp is None:
+        return  # a spurious extra table — the table-count issue already reports it
+
+    exp_rows = [tuple(_ecell(c) for c in row) for row in exp.table.rows]
+
+    # --- R6: duplicated header (compare repeat counts, never "data row == header") --
+    rendered_hdr = (
+        sum(1 for r in rendered if _row_text(r) == _row_text(rendered[0]))
+        if rendered else 0
+    )
+    expected_hdr = (
+        sum(1 for r in exp_rows if _row_text(r) == _row_text(exp_rows[0]))
+        if exp_rows else 0
+    )
+    if rendered and rendered_hdr >= 2 and rendered_hdr > expected_hdr:
+        emitter.add(
+            severity="error", source_page=page, markdown_line=line,
+            markdown_column=1, issue_type="duplicated_header",
+            description=(
+                f"the table at Markdown line {line} repeats its header row "
+                f"{rendered_hdr}×, but the reconstructed table carries it "
+                f"{expected_hdr}× — a repeated physical header is being emitted into "
+                "the output (FR-021/FR-022)"
+            ),
+            expected=str(expected_hdr),
+            found=str(rendered_hdr),
+        )
+        rendered = _drop_surplus_header_rows(rendered, rendered_hdr - expected_hdr)
+
+    # --- R5: placed-cell span geometry vs the authoritative LogicalTable ----------
+    if len(rendered) != len(exp_rows):
+        emitter.add(
+            severity="error", source_page=page, markdown_line=line,
+            markdown_column=1, issue_type="table_shape",
+            description=(
+                f"the table at Markdown line {line} has {len(rendered)} row(s); the "
+                f"reconstructed table has {len(exp_rows)} (FR-020/FR-021)"
+            ),
+            expected=str(len(exp_rows)),
+            found=str(len(rendered)),
+        )
+        return
+    for r, (rrow, erow) in enumerate(zip(rendered, exp_rows, strict=True)):
+        if len(rrow) != len(erow):
+            emitter.add(
+                severity="error", source_page=page, markdown_line=line,
+                markdown_column=1, issue_type="table_shape",
+                description=(
+                    f"the table at Markdown line {line}, row {r} has {len(rrow)} "
+                    f"cell(s); the reconstructed table has {len(erow)} (FR-020)"
+                ),
+                expected=str(len(erow)),
+                found=str(len(rrow)),
+            )
+            continue
+        for c, (rc, ec) in enumerate(zip(rrow, erow, strict=True)):
+            diffs: list[str] = []
+            if rc.tag != ec.tag:
+                diffs.append(f"cell tag <{rc.tag}> vs <{ec.tag}>")
+            if rc.rowspan != ec.rowspan:
+                diffs.append(f"rowspan {rc.rowspan} vs {ec.rowspan}")
+            if rc.colspan != ec.colspan:
+                diffs.append(f"colspan {rc.colspan} vs {ec.colspan}")
+            if diffs:
+                emitter.add(
+                    severity="error", source_page=page, markdown_line=line,
+                    markdown_column=1, issue_type="table_shape",
+                    description=(
+                        f"the table at Markdown line {line}, row {r}, column {c} "
+                        "disagrees with the reconstructed table geometry: "
+                        + "; ".join(diffs) + " (FR-020/FR-021)"
+                    ),
+                    expected=(
+                        f"<{ec.tag}> rowspan={ec.rowspan} colspan={ec.colspan}"
+                    ),
+                    found=f"<{rc.tag}> rowspan={rc.rowspan} colspan={rc.colspan}",
+                )
+
+
+def _drop_surplus_header_rows(
+    rows: list[tuple[_PCell, ...]], surplus: int
+) -> list[tuple[_PCell, ...]]:
+    """Keep the first header occurrence, drop ``surplus`` of the later repeats so the
+    span-geometry comparison is not swamped by the already-reported duplication."""
+    if surplus <= 0 or not rows:
+        return rows
+    header = _row_text(rows[0])
+    kept: list[tuple[_PCell, ...]] = []
+    seen = 0
+    for row in rows:
+        if _row_text(row) == header:
+            seen += 1
+            if seen > 1 and surplus > 0:
+                surplus -= 1
+                continue
+        kept.append(row)
+    return kept
 
 
 def _parse_tables(markdown: str) -> list[_ParsedTable]:
@@ -413,13 +675,19 @@ def _parse_tables(markdown: str) -> list[_ParsedTable]:
         line = lines[i].strip()
         if _is_pipe_row(line) and i + 1 < len(lines) and _is_separator_row(lines[i + 1]):
             start = i + 1
-            header = _split_pipe(line)
-            rows = [header]
+            rows_text: list[tuple[str, ...]] = [_split_pipe(line)]
             i += 2
             while i < len(lines) and _is_pipe_row(lines[i].strip()):
-                rows.append(_split_pipe(lines[i].strip()))
+                rows_text.append(_split_pipe(lines[i].strip()))
                 i += 1
-            out.append(_ParsedTable(tuple(rows), len(header), start))
+            prows = tuple(
+                tuple(
+                    _PCell("th" if ri == 0 else "td", 1, 1, _cnorm(cell))
+                    for cell in row
+                )
+                for ri, row in enumerate(rows_text)
+            )
+            out.append(_ParsedTable(prows, start, "pipe"))
             continue
         if line == "<table>":
             start = i + 1
@@ -443,7 +711,8 @@ def _is_separator_row(line: str) -> bool:
     s = line.strip()
     if not _is_pipe_row(s):
         return False
-    return all(_SEPARATOR_CELL_RE.match(c) for c in _split_pipe(s)) and bool(_split_pipe(s))
+    cells = _split_pipe(s)
+    return bool(cells) and all(_SEPARATOR_CELL_RE.match(c) for c in cells)
 
 
 def _split_pipe(line: str) -> tuple[str, ...]:
@@ -454,18 +723,22 @@ def _split_pipe(line: str) -> tuple[str, ...]:
 
 def _parse_html_table(block: list[str], line: int) -> _ParsedTable:
     joined = "\n".join(block)
-    rows: list[tuple[str, ...]] = []
-    ncols = 0
+    rows: list[tuple[_PCell, ...]] = []
     for tr in _TR_RE.findall(joined):
-        cells: list[str] = []
-        span_total = 0
-        for _tag, attrs, content in _CELL_RE.findall(tr):
-            cells.append(_html_unescape(content).strip())
-            m = _COLSPAN_RE.search(attrs)
-            span_total += int(m.group(1)) if m else 1
+        cells: list[_PCell] = []
+        for tag, attrs, content in _CELL_RE.findall(tr):
+            rs = _ROWSPAN_RE.search(attrs)
+            cs = _COLSPAN_RE.search(attrs)
+            cells.append(
+                _PCell(
+                    tag.lower(),
+                    int(rs.group(1)) if rs else 1,
+                    int(cs.group(1)) if cs else 1,
+                    _cnorm(_html_unescape(content)),
+                )
+            )
         rows.append(tuple(cells))
-        ncols = max(ncols, span_total)
-    return _ParsedTable(tuple(rows), ncols, line)
+    return _ParsedTable(tuple(rows), line, "html")
 
 
 def _html_unescape(text: str) -> str:
@@ -484,13 +757,25 @@ def _reading_order_check(
     markdown: str,
     semantic: SemanticDocument,
     ced: CanonicalExtractedDocument,
+    excluded_ids: frozenset[str],
     emitter: _Emitter,
 ) -> None:
     by_id = {s.segment_id: s for s in ced.accepted_segments}
     md_norm = _norm(markdown)
 
+    # A segment with no independent rendered occurrence must not be localised /
+    # ordered: a removed or collapsed segment, an identical-evidence table sibling, or
+    # a source surface a recorded ``dehyphenate`` transform merged away. The frozen
+    # heuristic restriction (uniquely localisable literal, length ≥ 8) is unchanged.
+    skip = set(excluded_ids)
+    for t in semantic.segment_transforms:
+        if t.kind == "dehyphenate":
+            skip.update(t.segment_ids)
+
     located: list[tuple[str, int, int]] = []  # (segment_id, offset, page)
     for sid in ced.accepted_reading_order:
+        if sid in skip:
+            continue
         seg = by_id.get(sid)
         if seg is None:
             continue
@@ -578,7 +863,13 @@ def _ocr_confidence_check(
         for rec in cand.page_ocr:
             if not rec.ran_ocr or rec.physical_page in flagged_pages:
                 continue
-            floor = rec.confidence_threshold or threshold
+            # explicit per-run value when present — 0 is a valid floor, never a
+            # truthiness fallback to the default (research §9a)
+            floor = (
+                threshold
+                if getattr(rec, "confidence_threshold", None) is None
+                else rec.confidence_threshold
+            )
             if rec.mean_confidence >= floor and rec.low_confidence_regions == 0:
                 continue
             flagged_pages.add(rec.physical_page)

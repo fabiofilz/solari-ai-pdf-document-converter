@@ -38,6 +38,7 @@ The ``RenderMap`` (per-block / per-segment codepoint spans + the ordered
 
 from __future__ import annotations
 
+import re
 from collections.abc import Collection
 
 from solari_converter.artifacts_io import markdown_bytes
@@ -71,6 +72,13 @@ MAX_MARKDOWN_HEADING_LEVEL: int = 6
 #: One nesting step of list indentation (envelope; never part of a segment's literal).
 LIST_INDENT: str = "  "
 
+#: A block-context line whose first non-space run is one of these would be parsed by a
+#: Markdown reader as structure (ATX heading, list, thematic break, setext underline).
+#: The renderer backslash-escapes that one lead character so the author literal renders
+#: verbatim (research §25.2 ``markdown_escape``). ``>`` / ``*`` / ``_`` / `` ` `` are
+#: already neutralised inline below, so they are not repeated here.
+_LEADING_STRUCTURE_RE = re.compile(r"^(\s{0,3})(#{1,6}|[-+~=]|\d+[.)])(?=\s|$)")
+
 
 def render_markdown(
     doc: SemanticDocument, *, ocr_segment_ids: Collection[str] = ()
@@ -99,6 +107,43 @@ def render_markdown_bytes(
     return markdown_bytes(render_markdown(doc, ocr_segment_ids=ocr_segment_ids))
 
 
+# --- Stage-5 context-aware escaping (research §25.2 ``markdown_escape``) -----------
+#
+# The renderer preserves the **literal author-visible content** of every segment while
+# emitting valid Markdown structure. It escapes only characters that a Markdown reader
+# would otherwise treat as active syntax; it never escapes the structural syntax the
+# renderer itself generates (the ``#`` of a heading, the ``*`` / ``[L{n}]`` of a deep
+# heading envelope, list indentation, table pipes, ``<table>``/``<tr>``/``<td>``).
+
+
+def _escape_inline(text: str) -> str:
+    """Neutralise every Markdown-/HTML-significant character a value contains so it
+    renders verbatim: backslash first, then HTML entities (``&`` before ``<``/``>`` so a
+    literal ``&lt;`` is not double-encoded), then the inline emphasis / code / autolink
+    triggers, then any hard line break folded to a literal ``<br>`` (a bare newline would
+    otherwise open a new block or a soft break)."""
+    out = text.replace("\\", "\\\\")
+    out = out.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    out = out.replace("`", "\\`").replace("*", "\\*").replace("_", "\\_")
+    out = out.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
+    return out
+
+
+def _escape_block_text(text: str) -> str:
+    """Inline escaping plus the one leading structural character (``#`` / ``-`` / ``+``
+    / ``~`` / ``=`` / ``1.``) a Markdown reader would treat as a block marker at the
+    start of a paragraph, clause, or list-item body."""
+    out = _escape_inline(text)
+    m = _LEADING_STRUCTURE_RE.match(out)
+    if m is None:
+        return out
+    marker = m.group(2)
+    # escape the significant char: the trailing '.'/')' of an ordered-list marker,
+    # else the first char of the run ('#'/'-'/'+'/'~'/'=').
+    at = m.start(2) + (len(marker) - 1 if marker[0].isdigit() else 0)
+    return out[:at] + "\\" + out[at:]
+
+
 # --- per-block rendering ----------------------------------------------------------
 
 
@@ -106,9 +151,9 @@ def _render_block(block: Block) -> str:
     if isinstance(block, HeadingBlock):
         return _render_heading(block)
     if isinstance(block, ParagraphBlock):
-        return block.text
+        return _escape_block_text(block.text)
     if isinstance(block, ClauseBlock):
-        return block.text
+        return _escape_block_text(block.text)
     if isinstance(block, ListBlock):
         return _render_list(block)
     if isinstance(block, TableBlock):
@@ -118,16 +163,29 @@ def _render_block(block: Block) -> str:
 
 def _render_heading(block: HeadingBlock) -> str:
     level = block.level
+    text = _escape_inline(block.text)
     if level <= MAX_MARKDOWN_HEADING_LEVEL and not block.deep:
-        return f"{'#' * level} {block.text}"
-    # deeper than Markdown can express → emphasised lead-in + explicit level marker
-    return f"*{block.text}* [L{level}]"
+        return f"{'#' * level} {text}"
+    # deeper than Markdown can express → emphasised lead-in + explicit level marker.
+    # ``text`` has its own ``*`` escaped inline, so the envelope ``*…*`` stays intact.
+    return f"*{text}* [L{level}]"
 
 
 def _render_list(block: ListBlock) -> str:
     return "\n".join(
-        f"{LIST_INDENT * item.depth}{item.text}" for item in block.items
+        f"{LIST_INDENT * item.depth}{_render_list_item_text(item)}"
+        for item in block.items
     )
+
+
+def _render_list_item_text(item) -> str:
+    """The item's own literal already carries its leading marker (T069 only classifies a
+    list item when a real marker is present). Keep that marker literal — it *is* the list
+    structure — and escape only the author text after it."""
+    marker = item.marker or ""
+    if marker and item.text.startswith(marker):
+        return marker + _escape_block_text(item.text[len(marker):])
+    return _escape_block_text(item.text)
 
 
 # --- table rendering -------------------------------------------------------------
@@ -161,13 +219,18 @@ def _render_html_table(rows: list[list[TableCell]]) -> str:
 
 
 def _pipe_cell(text: str) -> str:
-    """A pipe-table cell value: escape the structural pipe and backslash, and fold a
-    hard line break to ``<br>`` (a literal newline would break the table row). The
-    numeric / textual value itself is otherwise untouched (FR-020)."""
+    """A pipe-table cell value (research §25.2 ``markdown_escape``): backslash first,
+    then the structural pipe, then the inline emphasis / code triggers a cell still
+    parses (`` ` ``, ``*``, ``_``), then a hard line break folded to ``<br>`` (a literal
+    newline would break the table row). No numeric / separator normalisation (FR-020)."""
     return (
         text.replace("\\", "\\\\")
         .replace("|", "\\|")
+        .replace("`", "\\`")
+        .replace("*", "\\*")
+        .replace("_", "\\_")
         .replace("\r\n", "\n")
+        .replace("\r", "\n")
         .replace("\n", "<br>")
     )
 
@@ -183,11 +246,15 @@ def _html_cell(cell: TableCell) -> str:
 
 
 def _html_escape(text: str) -> str:
+    """An HTML ``<table>`` cell value (research §25.2 ``html_escape`` / ``cell_newline_br``):
+    ``&`` before ``<``/``>``, then a hard line break to ``<br>``. Markdown emphasis is
+    inert inside an HTML block, so no backslash escaping is needed or wanted here."""
     return (
         text.replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace("\r\n", "\n")
+        .replace("\r", "\n")
         .replace("\n", "<br>")
     )
 
